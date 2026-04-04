@@ -97,7 +97,7 @@ pub struct ParseError {
 }
 
 pub trait HasSchema {
-    fn json_schema() -> serde_json::Value;
+    fn rupia_schema() -> serde_json::Value;
 }
 
 pub struct HarnessConfig {

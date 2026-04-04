@@ -15,6 +15,11 @@ regex-lite = "0.1"
 serde.workspace = true
 schemars.workspace = true
 tokio.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "throughput"
+harness = false
 
 [lints]
 workspace = true

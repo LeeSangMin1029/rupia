@@ -31,7 +31,7 @@ pub fn parse_validate(raw: &str, schema: &serde_json::Value) -> Validation<serde
 pub fn parse_validate_typed<T: HasSchema + serde::de::DeserializeOwned>(
     raw: &str,
 ) -> Result<T, ValidationFailure> {
-    let schema = T::json_schema();
+    let schema = T::rupia_schema();
     match parse_validate(raw, &schema) {
         Validation::Success(v) => serde_json::from_value(v).map_err(|e| ValidationFailure {
             data: serde_json::Value::Null,

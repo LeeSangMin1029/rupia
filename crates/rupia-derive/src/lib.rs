@@ -9,11 +9,11 @@ pub fn derive_harness(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let expanded = quote! {
         impl #impl_generics rupia_core::types::HasSchema for #name #ty_generics #where_clause {
-            fn json_schema() -> serde_json::Value {
-                let gen = schemars::gen::SchemaSettings::draft2019_09()
+            fn rupia_schema() -> serde_json::Value {
+                let generator = schemars::r#gen::SchemaSettings::draft2019_09()
                     .with(|s| { s.inline_subschemas = false; })
                     .into_generator();
-                let schema = gen.into_root_schema_for::<#name>();
+                let schema = generator.into_root_schema_for::<#name>();
                 serde_json::to_value(schema).unwrap_or_default()
             }
         }
