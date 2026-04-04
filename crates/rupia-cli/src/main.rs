@@ -1,8 +1,13 @@
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use rupia_core::diagnostic::{
+    diagnose_parse_errors, format_diagnostics, format_diagnostics_json,
+};
+use rupia_core::guard;
 use rupia_core::types::{ParseResult, Validation};
 
 /// rupia — LLM output validation harness
@@ -14,6 +19,9 @@ use rupia_core::types::{ParseResult, Validation};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Verbose: print diagnostics to stderr
+    #[arg(short, long, global = true)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -23,9 +31,6 @@ enum Command {
         /// Input file (- or omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
-        /// Output format: json (default) or raw
-        #[arg(short, long, default_value = "json")]
-        format: String,
     },
     /// Validate input against a JSON Schema
     Validate {
@@ -48,7 +53,7 @@ enum Command {
         #[arg(short, long)]
         input: Option<PathBuf>,
     },
-    /// Full pipeline: parse → coerce → validate → feedback
+    /// Full pipeline: parse → coerce → validate → diagnostics
     Check {
         /// JSON Schema file
         #[arg(short, long)]
@@ -59,31 +64,42 @@ enum Command {
         /// Strict mode
         #[arg(long)]
         strict: bool,
+        /// Output diagnostics as JSON
+        #[arg(long)]
+        json: bool,
     },
-    /// Generate JSON Schema from a Rust type (via schemars)
-    Schema {
-        /// Schema file to pretty-print
+    /// Validate a schema file itself (check for common issues)
+    LintSchema {
+        /// Schema file to lint
         #[arg(short, long)]
-        input: PathBuf,
+        schema: PathBuf,
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Parse { input, format } => cmd_parse(input, &format),
+    let result = match cli.command {
+        Command::Parse { input } => cmd_parse(input),
         Command::Validate {
             schema,
             input,
             strict,
-        } => cmd_validate(&schema, input, strict),
+        } => cmd_validate(&schema, input, strict, cli.verbose),
         Command::Feedback { schema, input } => cmd_feedback(&schema, input),
         Command::Check {
             schema,
             input,
             strict,
-        } => cmd_check(&schema, input, strict),
-        Command::Schema { input } => cmd_schema(&input),
+            json,
+        } => cmd_check(&schema, input, strict, json, cli.verbose),
+        Command::LintSchema { schema } => cmd_lint_schema(&schema),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("[error] {e:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -108,56 +124,45 @@ fn load_schema(path: &PathBuf) -> Result<serde_json::Value> {
     serde_json::from_str(&content).with_context(|| format!("parsing schema {}", path.display()))
 }
 
-fn cmd_parse(input: Option<PathBuf>, format: &str) -> Result<()> {
+fn cmd_parse(input: Option<PathBuf>) -> Result<()> {
     let raw = read_input(input)?;
     match rupia_core::lenient::parse(&raw) {
         ParseResult::Success(v) => {
-            match format {
-                "raw" => println!("{v}"),
-                _ => println!("{}", serde_json::to_string_pretty(&v)?),
-            }
+            println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }
         ParseResult::Failure { errors, .. } => {
-            for e in &errors {
-                eprintln!("error: {}: expected {}", e.path, e.expected);
-                if let Some(desc) = &e.description {
-                    eprintln!("  {desc}");
-                }
-            }
+            let diags = diagnose_parse_errors(&errors, &raw);
+            eprint!("{}", format_diagnostics(&diags));
             bail!("parse failed with {} error(s)", errors.len())
         }
     }
 }
 
-fn cmd_validate(schema_path: &PathBuf, input: Option<PathBuf>, strict: bool) -> Result<()> {
+fn cmd_validate(
+    schema_path: &PathBuf,
+    input: Option<PathBuf>,
+    strict: bool,
+    verbose: bool,
+) -> Result<()> {
     let raw = read_input(input)?;
     let schema = load_schema(schema_path)?;
-    let parsed = match rupia_core::lenient::parse(&raw) {
-        ParseResult::Success(v) => v,
-        ParseResult::Failure { errors, .. } => {
-            for e in &errors {
-                eprintln!("parse error: {}: {}", e.path, e.expected);
-            }
-            bail!("input is not valid JSON")
-        }
+    let config = guard::Config {
+        strict,
+        verbose,
+        ..Default::default()
     };
-    let coerced = rupia_core::coerce::coerce_with_schema(parsed, &schema);
-    let result = if strict {
-        rupia_core::validator::validate_strict(&coerced, &schema)
-    } else {
-        rupia_core::validator::validate(&coerced, &schema)
-    };
-    match result {
-        Validation::Success(_) => {
-            println!("valid");
+    match guard::check(&raw, &schema, &config) {
+        Ok(result) => {
+            println!("{}", serde_json::to_string_pretty(&result.value)?);
             Ok(())
         }
-        Validation::Failure(f) => {
-            for e in &f.errors {
-                eprintln!("❌ {e}");
+        Err(e) => {
+            eprint!("{}", format_diagnostics(&e.diagnostics));
+            if let Some(fb) = &e.last_feedback {
+                eprintln!("\n--- LLM Feedback ---\n{fb}");
             }
-            bail!("{} validation error(s)", f.errors.len())
+            bail!("validation failed")
         }
     }
 }
@@ -167,7 +172,9 @@ fn cmd_feedback(schema_path: &PathBuf, input: Option<PathBuf>) -> Result<()> {
     let schema = load_schema(schema_path)?;
     let parsed = match rupia_core::lenient::parse(&raw) {
         ParseResult::Success(v) => v,
-        ParseResult::Failure { .. } => {
+        ParseResult::Failure { errors, .. } => {
+            let diags = diagnose_parse_errors(&errors, &raw);
+            eprint!("{}", format_diagnostics(&diags));
             println!("JSON parse failed. Please return valid JSON matching the schema.");
             return Ok(());
         }
@@ -185,58 +192,78 @@ fn cmd_feedback(schema_path: &PathBuf, input: Option<PathBuf>) -> Result<()> {
     }
 }
 
-fn cmd_check(schema_path: &PathBuf, input: Option<PathBuf>, strict: bool) -> Result<()> {
+fn cmd_check(
+    schema_path: &PathBuf,
+    input: Option<PathBuf>,
+    strict: bool,
+    json_output: bool,
+    verbose: bool,
+) -> Result<()> {
     let raw = read_input(input)?;
     let schema = load_schema(schema_path)?;
-    let parsed = match rupia_core::lenient::parse(&raw) {
-        ParseResult::Success(v) => v,
-        ParseResult::Failure { errors, .. } => {
-            let output = serde_json::json!({
-                "status": "parse_error",
-                "errors": errors.iter().map(|e| serde_json::json!({
-                    "path": e.path,
-                    "expected": e.expected,
-                    "description": e.description,
-                })).collect::<Vec<_>>(),
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-            return Ok(());
-        }
+    let config = guard::Config {
+        strict,
+        verbose,
+        ..Default::default()
     };
-    let coerced = rupia_core::coerce::coerce_with_schema(parsed, &schema);
-    let result = if strict {
-        rupia_core::validator::validate_strict(&coerced, &schema)
-    } else {
-        rupia_core::validator::validate(&coerced, &schema)
-    };
-    match result {
-        Validation::Success(data) => {
-            let output = serde_json::json!({
-                "status": "valid",
-                "data": data,
-            });
+    match guard::check(&raw, &schema, &config) {
+        Ok(result) => {
+            let output = if json_output {
+                serde_json::json!({
+                    "status": "valid",
+                    "data": result.value,
+                    "diagnostics": format_diagnostics_json(&result.diagnostics),
+                })
+            } else {
+                serde_json::json!({
+                    "status": "valid",
+                    "data": result.value,
+                })
+            };
             println!("{}", serde_json::to_string_pretty(&output)?);
             Ok(())
         }
-        Validation::Failure(f) => {
-            let output = serde_json::json!({
-                "status": "invalid",
-                "error_count": f.error_count(),
-                "feedback": f.to_llm_feedback(),
-                "errors": f.errors.iter().map(|e| serde_json::json!({
-                    "path": e.path,
-                    "expected": e.expected,
-                    "value": e.value,
-                })).collect::<Vec<_>>(),
-            });
+        Err(e) => {
+            let feedback = e.last_feedback.as_deref().unwrap_or("");
+            let output = if json_output {
+                serde_json::json!({
+                    "status": "invalid",
+                    "error_count": e.diagnostics.iter().filter(|d| d.severity == rupia_core::diagnostic::Severity::Error).count(),
+                    "diagnostics": format_diagnostics_json(&e.diagnostics),
+                    "feedback": feedback,
+                })
+            } else {
+                serde_json::json!({
+                    "status": "invalid",
+                    "error_count": e.diagnostics.len(),
+                    "feedback": feedback,
+                    "errors": e.diagnostics.iter().map(|d| serde_json::json!({
+                        "code": d.code,
+                        "message": d.message,
+                        "help": d.help,
+                    })).collect::<Vec<_>>(),
+                })
+            };
             println!("{}", serde_json::to_string_pretty(&output)?);
             Ok(())
         }
     }
 }
 
-fn cmd_schema(input: &PathBuf) -> Result<()> {
-    let schema = load_schema(input)?;
-    println!("{}", serde_json::to_string_pretty(&schema)?);
+fn cmd_lint_schema(schema_path: &std::path::Path) -> Result<()> {
+    let path_str = schema_path.to_string_lossy();
+    let diags = guard::check_schema_file(&path_str);
+    if diags.is_empty() {
+        println!("schema OK: {path_str}");
+        return Ok(());
+    }
+    eprint!("{}", format_diagnostics(&diags));
+    let errors = diags
+        .iter()
+        .filter(|d| d.severity == rupia_core::diagnostic::Severity::Error)
+        .count();
+    if errors > 0 {
+        bail!("{errors} schema error(s)")
+    }
     Ok(())
 }

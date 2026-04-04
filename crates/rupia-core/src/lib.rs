@@ -4,3 +4,5 @@ pub mod validator;
 pub mod feedback;
 pub mod harness;
 pub mod types;
+pub mod diagnostic;
+pub mod guard;
