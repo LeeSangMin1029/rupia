@@ -1,0 +1,10 @@
+[skill]
+name = "rupia"
+source = "local"
+description = "LLM output validation harness — lenient parse, schema coerce, structured feedback, self-healing loop"
+tags = ["rust", "go", "validation", "function-calling", "schema", "harness", "llm"]
+deps = []
+
+[skill.match]
+files = ["Cargo.toml", "go.mod"]
+keywords = ["llm", "function calling", "schema validation", "harness", "structured output"]

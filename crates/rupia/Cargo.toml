@@ -1,0 +1,16 @@
+[package]
+name = "rupia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rupia-core = { path = "../rupia-core" }
+rupia-derive = { path = "../rupia-derive" }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

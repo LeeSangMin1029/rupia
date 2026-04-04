@@ -1,0 +1,6 @@
+#!/bin/sh
+if git diff --cached --name-only | xargs -I {} sh -c 'git show :"{}" 2>/dev/null | grep -Pql "\r$" && echo "{}"' 2>/dev/null | grep -q .; then
+    echo "[pre-commit] CRLF detected — convert to LF first"
+    echo "  fix: git add --renormalize ."
+    exit 1
+fi
