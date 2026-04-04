@@ -1,0 +1,19 @@
+[package]
+name = "rupia-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rupia"
+path = "src/main.rs"
+
+[dependencies]
+rupia-core = { path = "../rupia-core" }
+serde_json.workspace = true
+schemars.workspace = true
+clap = { version = "4", features = ["derive"] }
+anyhow.workspace = true
+
+[lints]
+workspace = true
