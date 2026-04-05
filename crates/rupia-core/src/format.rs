@@ -87,10 +87,10 @@ fn is_time(s: &str) -> bool {
 }
 
 fn is_duration(s: &str) -> bool {
+    static L: OnceLock<Regex> = OnceLock::new();
     if !s.starts_with('P') || s == "P" || s == "PT" {
         return false;
     }
-    static L: OnceLock<Regex> = OnceLock::new();
     re(&L, r"^P((\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+S)?)?|(\d+W))$").is_match(s)
 }
 
@@ -105,11 +105,11 @@ fn is_ipv6(s: &str) -> bool {
 }
 
 fn is_hostname(s: &str) -> bool {
+    static L: OnceLock<Regex> = OnceLock::new();
     let trimmed = s.strip_suffix('.').unwrap_or(s);
     if trimmed.is_empty() || trimmed.len() > 253 {
         return false;
     }
-    static L: OnceLock<Regex> = OnceLock::new();
     re(&L, r"(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-0-9a-z]{0,61}[0-9a-z])?)*\.?$").is_match(s)
 }
 

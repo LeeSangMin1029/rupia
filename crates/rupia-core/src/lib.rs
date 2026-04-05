@@ -5,5 +5,6 @@ pub mod feedback;
 pub mod format;
 pub mod harness;
 pub mod types;
+pub mod random;
 pub mod diagnostic;
 pub mod guard;
