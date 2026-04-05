@@ -54,7 +54,8 @@ fn validate_value(
     }
     if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
         if let Some(arr) = variants.as_array() {
-            validate_one_of(value, arr, defs, path, required, equals, errors);
+            let discriminator = schema.get("x-discriminator");
+            validate_one_of(value, arr, discriminator, defs, path, required, equals, errors);
             return;
         }
     }
@@ -108,26 +109,63 @@ fn validate_value(
     }
 }
 
+fn resolve_variant<'a>(schema: &'a Value, defs: Option<&'a Value>) -> &'a Value {
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        let key = r
+            .strip_prefix("#/$defs/")
+            .or_else(|| r.strip_prefix("#/definitions/"));
+        if let Some(resolved) = key.and_then(|k| defs?.get(k)) {
+            return resolve_variant(resolved, defs);
+        }
+    }
+    schema
+}
+
+#[expect(clippy::too_many_arguments, reason = "discriminator adds 1 param to existing 7")]
 fn validate_one_of(
     value: &Value,
     variants: &[Value],
+    discriminator: Option<&Value>,
     defs: Option<&Value>,
     path: &str,
     required: bool,
     equals: bool,
     errors: &mut Vec<ValidationError>,
 ) {
+    if let Some(disc) = discriminator {
+        if let Some(prop_name) = disc.get("propertyName").and_then(Value::as_str) {
+            if let Some(disc_val) = value.as_object().and_then(|o| o.get(prop_name)) {
+                if let Some(mapping) = disc.get("mapping").and_then(Value::as_object) {
+                    if let Some(disc_str) = disc_val.as_str() {
+                        if let Some(ref_val) = mapping.get(disc_str).and_then(Value::as_str) {
+                            for variant in variants {
+                                if variant.get("$ref").and_then(Value::as_str) == Some(ref_val) {
+                                    validate_value(value, variant, defs, path, required, equals, errors);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                for variant in variants {
+                    let resolved = resolve_variant(variant, defs);
+                    if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
+                        if let Some(prop_schema) = props.get(prop_name) {
+                            if let Some(enums) = prop_schema.get("enum").and_then(Value::as_array) {
+                                if enums.contains(disc_val) {
+                                    validate_value(value, variant, defs, path, required, equals, errors);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     for variant in variants {
         let mut sub_errors = Vec::new();
-        validate_value(
-            value,
-            variant,
-            defs,
-            path,
-            required,
-            equals,
-            &mut sub_errors,
-        );
+        validate_value(value, variant, defs, path, required, equals, &mut sub_errors);
         if sub_errors.is_empty() {
             return;
         }

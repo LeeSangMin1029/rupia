@@ -68,6 +68,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Generate random data matching a JSON Schema
+    Random {
+        /// JSON Schema file
+        #[arg(short, long)]
+        schema: PathBuf,
+        /// Number of samples to generate
+        #[arg(short, long, default_value = "1")]
+        count: u32,
+    },
     /// Validate a schema file itself (check for common issues)
     LintSchema {
         /// Schema file to lint
@@ -92,6 +101,7 @@ fn main() -> ExitCode {
             strict,
             json,
         } => cmd_check(&schema, input, strict, json, cli.verbose),
+        Command::Random { schema, count } => cmd_random(&schema, count),
         Command::LintSchema { schema } => cmd_lint_schema(&schema),
     };
     match result {
@@ -248,6 +258,15 @@ fn cmd_check(
             Ok(())
         }
     }
+}
+
+fn cmd_random(schema_path: &PathBuf, count: u32) -> Result<()> {
+    let schema = load_schema(schema_path)?;
+    for _ in 0..count {
+        let value = rupia_core::random::generate(&schema);
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+    Ok(())
 }
 
 fn cmd_lint_schema(schema_path: &std::path::Path) -> Result<()> {
