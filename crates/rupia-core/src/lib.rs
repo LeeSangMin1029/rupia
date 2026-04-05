@@ -2,6 +2,7 @@ pub mod lenient;
 pub mod coerce;
 pub mod validator;
 pub mod feedback;
+pub mod format;
 pub mod harness;
 pub mod types;
 pub mod diagnostic;

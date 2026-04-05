@@ -265,41 +265,15 @@ fn validate_string(s: &str, schema: &Value, path: &str, errors: &mut Vec<Validat
             }
         }
     }
-    if let Some(format) = schema.get("format").and_then(Value::as_str) {
-        if !validate_format(s, format) {
+    if let Some(fmt) = schema.get("format").and_then(Value::as_str) {
+        if !crate::format::validate(s, fmt) {
             errors.push(ValidationError {
                 path: path.to_owned(),
-                expected: format!("string & Format<\"{format}\">"),
+                expected: format!("string & Format<\"{fmt}\">"),
                 value: Value::String(s.to_owned()),
                 description: None,
             });
         }
-    }
-}
-
-fn validate_format(s: &str, format: &str) -> bool {
-    match format {
-        "email" => s.contains('@') && s.contains('.') && s.len() >= 5,
-        "uri" | "url" => s.starts_with("http://") || s.starts_with("https://"),
-        "uuid" => {
-            s.len() == 36
-                && s.chars().enumerate().all(|(i, c)| {
-                    if i == 8 || i == 13 || i == 18 || i == 23 {
-                        c == '-'
-                    } else {
-                        c.is_ascii_hexdigit()
-                    }
-                })
-        }
-        "date-time" | "datetime" => s.len() >= 19 && s.contains('T'),
-        "date" => s.len() == 10 && s.chars().nth(4) == Some('-'),
-        "time" => s.len() >= 8 && s.contains(':'),
-        "ipv4" => {
-            let parts: Vec<&str> = s.split('.').collect();
-            parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
-        }
-        "ipv6" => s.contains(':') && s.len() >= 2,
-        _ => true,
     }
 }
 
