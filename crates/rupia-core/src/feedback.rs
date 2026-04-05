@@ -88,18 +88,33 @@ fn stringify_value(
     let err = error_comment(path, errors_by_path, used);
     match value {
         Value::Array(arr) => {
-            if arr.is_empty() {
+            let wildcard_path = format!("{path}[]");
+            let missing_elements = get_missing_array_errors(&wildcard_path, errors_by_path, used);
+            if arr.is_empty() && missing_elements.is_empty() {
                 return format!("{indent}[]{err}");
             }
             let mut lines = vec![format!("{indent}[{err}")];
+            let has_missing = !missing_elements.is_empty();
             for (i, item) in arr.iter().enumerate() {
                 let item_path = format!("{path}[{i}]");
                 let mut item_str =
                     stringify_value(item, errors_by_path, &item_path, tab + 1, true, used);
-                if i < arr.len() - 1 {
+                if i < arr.len() - 1 || has_missing {
                     item_str = insert_comma_before_comment(&item_str);
                 }
                 lines.push(item_str);
+            }
+            let inner_indent = "  ".repeat(tab + 1);
+            for (idx, me) in missing_elements.iter().enumerate() {
+                let comma = if idx < missing_elements.len() - 1 {
+                    ","
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "{inner_indent}undefined{comma} // ❌ [{{\"path\":\"{}\",\"expected\":\"{}\"}}]",
+                    me.path, me.expected
+                ));
             }
             lines.push(format!("{indent}]"));
             lines.join("\n")
@@ -198,6 +213,18 @@ fn find_missing_properties(
     missing.sort();
     missing.dedup();
     missing
+}
+
+fn get_missing_array_errors<'a>(
+    wildcard_path: &str,
+    errors_by_path: &HashMap<&str, Vec<&'a ValidationError>>,
+    used: &mut Vec<String>,
+) -> Vec<&'a ValidationError> {
+    let Some(errors) = errors_by_path.get(wildcard_path) else {
+        return Vec::new();
+    };
+    used.push(wildcard_path.to_owned());
+    errors.clone()
 }
 
 #[cfg(test)]
