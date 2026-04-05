@@ -347,32 +347,29 @@ fn matches_type(value: &Value, schema: &Value) -> bool {
     }
 }
 
-fn is_string_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("string")
+fn schema_is(schema: &Value, ty: &str) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some(ty)
 }
-
-fn is_boolean_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("boolean")
+fn is_string_schema(s: &Value) -> bool {
+    schema_is(s, "string")
 }
-
-fn is_null_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("null")
+fn is_boolean_schema(s: &Value) -> bool {
+    schema_is(s, "boolean")
 }
-
-fn is_array_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("array")
+fn is_null_schema(s: &Value) -> bool {
+    schema_is(s, "null")
 }
-
-fn is_object_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("object")
+fn is_array_schema(s: &Value) -> bool {
+    schema_is(s, "array")
 }
-
-fn is_number_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("number")
+fn is_object_schema(s: &Value) -> bool {
+    schema_is(s, "object")
 }
-
-fn is_integer_schema(schema: &Value) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some("integer")
+fn is_number_schema(s: &Value) -> bool {
+    schema_is(s, "number")
+}
+fn is_integer_schema(s: &Value) -> bool {
+    schema_is(s, "integer")
 }
 
 #[cfg(test)]

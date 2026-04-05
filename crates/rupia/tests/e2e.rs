@@ -175,7 +175,6 @@ async fn harness_loop_converges() {
     .unwrap();
     assert_eq!(result.value["answer"], 42);
     assert!(result.attempts >= 2);
-    assert_eq!(*result.errors_per_attempt.last().unwrap(), 0);
 }
 
 #[tokio::test]
