@@ -6,5 +6,6 @@ pub mod format;
 pub mod harness;
 pub mod types;
 pub mod random;
+pub mod llm;
 pub mod diagnostic;
 pub mod guard;
