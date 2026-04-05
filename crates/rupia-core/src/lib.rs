@@ -7,5 +7,6 @@ pub mod harness;
 pub mod types;
 pub mod random;
 pub mod llm;
+pub mod schema_ops;
 pub mod diagnostic;
 pub mod guard;

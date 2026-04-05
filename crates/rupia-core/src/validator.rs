@@ -55,7 +55,16 @@ fn validate_value(
     if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
         if let Some(arr) = variants.as_array() {
             let discriminator = schema.get("x-discriminator");
-            validate_one_of(value, arr, discriminator, defs, path, required, equals, errors);
+            validate_one_of(
+                value,
+                arr,
+                discriminator,
+                defs,
+                path,
+                required,
+                equals,
+                errors,
+            );
             return;
         }
     }
@@ -121,7 +130,10 @@ fn resolve_variant<'a>(schema: &'a Value, defs: Option<&'a Value>) -> &'a Value 
     schema
 }
 
-#[expect(clippy::too_many_arguments, reason = "discriminator adds 1 param to existing 7")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "discriminator adds 1 param to existing 7"
+)]
 fn validate_one_of(
     value: &Value,
     variants: &[Value],
@@ -140,7 +152,9 @@ fn validate_one_of(
                         if let Some(ref_val) = mapping.get(disc_str).and_then(Value::as_str) {
                             for variant in variants {
                                 if variant.get("$ref").and_then(Value::as_str) == Some(ref_val) {
-                                    validate_value(value, variant, defs, path, required, equals, errors);
+                                    validate_value(
+                                        value, variant, defs, path, required, equals, errors,
+                                    );
                                     return;
                                 }
                             }
@@ -153,7 +167,9 @@ fn validate_one_of(
                         if let Some(prop_schema) = props.get(prop_name) {
                             if let Some(enums) = prop_schema.get("enum").and_then(Value::as_array) {
                                 if enums.contains(disc_val) {
-                                    validate_value(value, variant, defs, path, required, equals, errors);
+                                    validate_value(
+                                        value, variant, defs, path, required, equals, errors,
+                                    );
                                     return;
                                 }
                             }
@@ -165,7 +181,15 @@ fn validate_one_of(
     }
     for variant in variants {
         let mut sub_errors = Vec::new();
-        validate_value(value, variant, defs, path, required, equals, &mut sub_errors);
+        validate_value(
+            value,
+            variant,
+            defs,
+            path,
+            required,
+            equals,
+            &mut sub_errors,
+        );
         if sub_errors.is_empty() {
             return;
         }
@@ -352,6 +376,14 @@ fn validate_array(
             });
         }
     }
+    if schema.get("uniqueItems").and_then(Value::as_bool) == Some(true) && !is_unique(arr) {
+        errors.push(ValidationError {
+            path: path.to_owned(),
+            expected: "array & UniqueItems".into(),
+            value: Value::Array(arr.to_vec()),
+            description: Some("Array contains duplicate elements.".into()),
+        });
+    }
     if let Some(items_schema) = schema.get("items") {
         for (i, item) in arr.iter().enumerate() {
             validate_value(
@@ -450,6 +482,20 @@ fn expected_type(schema: &Value) -> String {
         return "union type".into();
     }
     "unknown".into()
+}
+
+fn is_unique(arr: &[Value]) -> bool {
+    if arr.len() < 2 {
+        return true;
+    }
+    for i in 0..arr.len() {
+        for j in (i + 1)..arr.len() {
+            if arr[i] == arr[j] {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -567,5 +613,19 @@ mod tests {
         let value = json!({"name": "test", "extra": true});
         assert!(validate(&value, &schema).is_success());
         assert!(!validate_strict(&value, &schema).is_success());
+    }
+
+    #[test]
+    fn unique_items() {
+        let schema = json!({"type": "array", "items": {"type": "number"}, "uniqueItems": true});
+        assert!(validate(&json!([1, 2, 3]), &schema).is_success());
+        assert!(!validate(&json!([1, 2, 2]), &schema).is_success());
+    }
+
+    #[test]
+    fn unique_items_objects() {
+        let schema = json!({"type": "array", "items": {"type": "object"}, "uniqueItems": true});
+        assert!(validate(&json!([{"a":1},{"b":2}]), &schema).is_success());
+        assert!(!validate(&json!([{"a":1},{"a":1}]), &schema).is_success());
     }
 }
