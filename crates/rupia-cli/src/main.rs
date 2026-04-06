@@ -80,6 +80,9 @@ enum Command {
         /// Schema file to lint
         #[arg(short, long)]
         schema: PathBuf,
+        /// Verify counterexamples from AVE package are rejected by the schema
+        #[arg(long)]
+        verify_counterexamples: bool,
     },
     /// Generate boundary test cases from a JSON Schema
     BoundaryGen {
@@ -101,6 +104,9 @@ enum Command {
         /// Model tier: haiku, sonnet, opus
         #[arg(short, long, default_value = "sonnet")]
         model: String,
+        /// Output as structured JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -122,13 +128,17 @@ fn main() -> ExitCode {
         } => cmd_check(&schema, input, strict, json, cli.verbose),
         Command::Random { schema, count } => cmd_random(&schema, count),
         Command::BoundaryGen { schema } => cmd_boundary_gen(&schema),
-        Command::LintSchema { schema } => cmd_lint_schema(&schema),
+        Command::LintSchema {
+            schema,
+            verify_counterexamples,
+        } => cmd_lint_schema(&schema, verify_counterexamples),
         Command::Ave {
             domain,
             schema,
             input,
             model,
-        } => cmd_ave(domain, schema.as_ref(), input, &model),
+            json,
+        } => cmd_ave(domain, schema.as_ref(), input, &model, json),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -154,10 +164,37 @@ fn read_input(path: Option<PathBuf>) -> Result<String> {
     }
 }
 
+struct LoadedSchema {
+    schema: serde_json::Value,
+    relations: Vec<rupia_core::ave::FieldRelation>,
+    counterexamples: Vec<serde_json::Value>,
+}
+
 fn load_schema(path: &PathBuf) -> Result<serde_json::Value> {
+    Ok(load_schema_full(path)?.schema)
+}
+
+fn load_schema_full(path: &PathBuf) -> Result<LoadedSchema> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("reading schema {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("parsing schema {}", path.display()))
+    let root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing schema {}", path.display()))?;
+    if let Some(inner) = root.get("schema") {
+        if inner.get("type").is_some() || inner.get("properties").is_some() {
+            let pkg = rupia_core::ave::parse_schema_package(&content)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return Ok(LoadedSchema {
+                schema: pkg.schema,
+                relations: pkg.relations,
+                counterexamples: pkg.counterexamples,
+            });
+        }
+    }
+    Ok(LoadedSchema {
+        schema: root,
+        relations: vec![],
+        counterexamples: vec![],
+    })
 }
 
 fn cmd_parse(input: Option<PathBuf>) -> Result<()> {
@@ -236,27 +273,49 @@ fn cmd_check(
     verbose: bool,
 ) -> Result<()> {
     let raw = read_input(input)?;
-    let schema = load_schema(schema_path)?;
+    let loaded = load_schema_full(schema_path)?;
     let config = guard::Config {
         strict,
         verbose,
         ..Default::default()
     };
-    match guard::check(&raw, &schema, &config) {
+    match guard::check(&raw, &loaded.schema, &config) {
         Ok(result) => {
-            let output = if json_output {
-                serde_json::json!({
-                    "status": "valid",
-                    "data": result.value,
-                    "diagnostics": format_diagnostics_json(&result.diagnostics),
-                })
+            let rel_violations =
+                rupia_core::ave::validate_relations(&result.value, &loaded.relations);
+            if rel_violations.is_empty() {
+                let output = if json_output {
+                    serde_json::json!({
+                        "status": "valid",
+                        "data": result.value,
+                        "diagnostics": format_diagnostics_json(&result.diagnostics),
+                    })
+                } else {
+                    serde_json::json!({
+                        "status": "valid",
+                        "data": result.value,
+                    })
+                };
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                serde_json::json!({
-                    "status": "valid",
-                    "data": result.value,
-                })
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
+                let rel_errors: Vec<serde_json::Value> = rel_violations
+                    .iter()
+                    .map(|v| {
+                        serde_json::json!({
+                            "code": "RUPIA-REL001",
+                            "message": v.description,
+                            "help": format!("{} {} {} violated", v.field_a, v.operator, v.field_b),
+                        })
+                    })
+                    .collect();
+                let output = serde_json::json!({
+                    "status": "invalid",
+                    "error_count": rel_violations.len(),
+                    "feedback": "Cross-field relation constraints violated",
+                    "errors": rel_errors,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
             Ok(())
         }
         Err(e) => {
@@ -309,15 +368,18 @@ fn cmd_ave(
     schema_path: Option<&PathBuf>,
     input: Option<PathBuf>,
     model: &str,
+    json_output: bool,
 ) -> Result<()> {
     let tier = parse_model_tier(model)?;
-    let schema = if let Some(p) = schema_path {
-        load_schema(p)?
+    let loaded = if let Some(p) = schema_path {
+        load_schema_full(p)?
     } else {
         let domain = domain.context("either --domain or --schema is required")?;
         let prompt = rupia_core::ave::generate_schema_prompt(&domain);
-        println!("--- Schema Generation Prompt ---\n{prompt}\n---");
-        println!("Provide the LLM response as input (stdin or --input):");
+        if !json_output {
+            println!("--- Schema Generation Prompt ---\n{prompt}\n---");
+            println!("Provide the LLM response as input (stdin or --input):");
+        }
         let raw = read_input(input.clone())?;
         let config = rupia_core::ave::AveConfig {
             domain,
@@ -325,19 +387,17 @@ fn cmd_ave(
             ..Default::default()
         };
         let pkg = rupia_core::ave::schema_resolve(&raw, &config).map_err(|e| anyhow::anyhow!(e))?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema": pkg.schema,
-                "relations": pkg.relations.iter().map(|r| serde_json::json!({
-                    "field_a": r.field_a,
-                    "operator": r.operator,
-                    "field_b": r.field_b,
-                })).collect::<Vec<_>>(),
-                "summary": pkg.summary,
-                "counterexamples_count": pkg.counterexamples.len(),
-            }))?
-        );
+        let out = serde_json::json!({
+            "schema": pkg.schema,
+            "relations": pkg.relations.iter().map(|r| serde_json::json!({
+                "field_a": r.field_a,
+                "operator": r.operator,
+                "field_b": r.field_b,
+            })).collect::<Vec<_>>(),
+            "summary": pkg.summary,
+            "counterexamples_count": pkg.counterexamples.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     };
     let raw = read_input(input)?;
@@ -348,19 +408,37 @@ fn cmd_ave(
                 bail!("parse failed with {} error(s)", errors.len())
             }
         })?;
-    let results = rupia_core::ave::validate_with_confidence(&parsed, &schema, &[]);
-    let output: Vec<serde_json::Value> = results
-        .iter()
-        .map(|r| {
-            serde_json::json!({
+    let results =
+        rupia_core::ave::validate_with_confidence(&parsed, &loaded.schema, &loaded.relations);
+    if json_output {
+        let valid = results.iter().all(|r| {
+            r.status == rupia_core::ave::FieldStatus::Valid
+                || r.status == rupia_core::ave::FieldStatus::Coerced
+        });
+        let output = serde_json::json!({
+            "status": if valid { "valid" } else { "invalid" },
+            "fields": results.iter().map(|r| serde_json::json!({
                 "field": r.field,
                 "status": format!("{:?}", r.status),
                 "confidence": r.confidence,
                 "coercion": r.coercion,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        let output: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "field": r.field,
+                    "status": format!("{:?}", r.status),
+                    "confidence": r.confidence,
+                    "coercion": r.coercion,
+                })
             })
-        })
-        .collect();
-    println!("{}", serde_json::to_string_pretty(&output)?);
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    }
     Ok(())
 }
 
@@ -382,9 +460,23 @@ fn cmd_boundary_gen(schema_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_lint_schema(schema_path: &std::path::Path) -> Result<()> {
+fn cmd_lint_schema(schema_path: &std::path::Path, verify_counterexamples: bool) -> Result<()> {
     let path_str = schema_path.to_string_lossy();
-    let diags = guard::check_schema_file(&path_str);
+    let mut diags = guard::check_schema_file(&path_str);
+    let loaded = load_schema_full(&schema_path.to_path_buf())?;
+    if verify_counterexamples || !loaded.counterexamples.is_empty() {
+        let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
+        for w in &ce_warnings {
+            diags.push(rupia_core::diagnostic::Diagnostic {
+                severity: rupia_core::diagnostic::Severity::Warning,
+                code: "RUPIA-CE001",
+                message: w.clone(),
+                help: "Schema may be too loose — this counterexample should be rejected"
+                    .to_string(),
+                context: None,
+            });
+        }
+    }
     if diags.is_empty() {
         println!("schema OK: {path_str}");
         return Ok(());
@@ -398,4 +490,24 @@ fn cmd_lint_schema(schema_path: &std::path::Path) -> Result<()> {
         bail!("{errors} schema error(s)")
     }
     Ok(())
+}
+
+fn check_counterexamples(
+    schema: &serde_json::Value,
+    counterexamples: &[serde_json::Value],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let config = guard::Config::default();
+    for (i, ce) in counterexamples.iter().enumerate() {
+        let Ok(ce_str) = serde_json::to_string(ce) else {
+            continue;
+        };
+        if guard::check(&ce_str, schema, &config).is_ok() {
+            warnings.push(format!(
+                "Counterexample {} passed validation — schema may be too loose",
+                i + 1
+            ));
+        }
+    }
+    warnings
 }
