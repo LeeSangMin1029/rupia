@@ -92,22 +92,37 @@ fn validate_value(
         }
         return;
     }
-    if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
-        if let Some(arr) = variants.as_array() {
-            let discriminator = schema.get("x-discriminator");
-            validate_one_of(
-                value,
-                arr,
-                discriminator,
-                defs,
-                path,
-                required,
-                equals,
-                errors,
-                depth,
-            );
-            return;
-        }
+    if let Some(variants) = schema.get("oneOf").and_then(Value::as_array) {
+        let discriminator = schema.get("x-discriminator");
+        validate_one_of(
+            value,
+            variants,
+            discriminator,
+            defs,
+            path,
+            required,
+            equals,
+            errors,
+            depth,
+            true,
+        );
+        return;
+    }
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        let discriminator = schema.get("x-discriminator");
+        validate_one_of(
+            value,
+            variants,
+            discriminator,
+            defs,
+            path,
+            required,
+            equals,
+            errors,
+            depth,
+            false,
+        );
+        return;
     }
     if let Some(all) = schema.get("allOf").and_then(Value::as_array) {
         for sub in all {
@@ -245,7 +260,7 @@ fn resolve_variant<'a>(schema: &'a Value, defs: Option<&'a Value>, depth: u32) -
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "discriminator adds 1 param to existing 7"
+    reason = "discriminator + strict_one adds params"
 )]
 fn validate_one_of(
     value: &Value,
@@ -257,6 +272,7 @@ fn validate_one_of(
     equals: bool,
     errors: &mut Vec<ValidationError>,
     depth: u32,
+    strict_one: bool,
 ) {
     if let Some(disc) = discriminator {
         if let Some(prop_name) = disc.get("propertyName").and_then(Value::as_str) {
@@ -293,6 +309,7 @@ fn validate_one_of(
             }
         }
     }
+    let mut match_count = 0u32;
     for variant in variants {
         let mut sub_errors = Vec::new();
         validate_value(
@@ -306,15 +323,28 @@ fn validate_one_of(
             depth,
         );
         if sub_errors.is_empty() {
-            return;
+            match_count += 1;
+            if !strict_one {
+                return;
+            }
         }
     }
+    if strict_one && match_count == 1 {
+        return;
+    }
     let expected: Vec<String> = variants.iter().map(expected_type).collect();
+    let desc = if strict_one && match_count > 1 {
+        Some(format!(
+            "oneOf: expected exactly 1 match but found {match_count}"
+        ))
+    } else {
+        None
+    };
     errors.push(ValidationError {
         path: path.to_owned(),
         expected: format!("({})", expected.join(" | ")),
         value: value.clone(),
-        description: None,
+        description: desc,
     });
 }
 
@@ -324,21 +354,9 @@ fn validate_number(
     path: &str,
     errors: &mut Vec<ValidationError>,
 ) {
-    let ty = schema
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("number");
-    if ty == "integer" {
-        if n.as_i64().is_none() && n.as_u64().is_none() {
-            errors.push(ValidationError {
-                path: path.to_owned(),
-                expected: "integer".into(),
-                value: Value::Number(n.clone()),
-                description: None,
-            });
-            return;
-        }
-    } else if ty != "number" {
+    let is_integer = is_type(schema, "integer");
+    let is_number = is_type(schema, "number");
+    if !is_integer && !is_number {
         errors.push(ValidationError {
             path: path.to_owned(),
             expected: expected_type(schema),
@@ -347,6 +365,20 @@ fn validate_number(
         });
         return;
     }
+    if is_integer && !is_number && n.as_i64().is_none() && n.as_u64().is_none() {
+        errors.push(ValidationError {
+            path: path.to_owned(),
+            expected: "integer".into(),
+            value: Value::Number(n.clone()),
+            description: None,
+        });
+        return;
+    }
+    let ty = if is_integer && (n.as_i64().is_some() || n.as_u64().is_some()) {
+        "integer"
+    } else {
+        "number"
+    };
     let val = n.as_f64().unwrap_or(0.0);
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if val < min {
@@ -501,17 +533,34 @@ fn validate_array(
         });
     }
     if let Some(items_schema) = schema.get("items") {
-        for (i, item) in arr.iter().enumerate() {
-            validate_value(
-                item,
-                items_schema,
-                defs,
-                &format!("{path}[{i}]"),
-                true,
-                equals,
-                errors,
-                depth,
-            );
+        if let Some(tuple_schemas) = items_schema.as_array() {
+            for (i, item) in arr.iter().enumerate() {
+                if let Some(ith_schema) = tuple_schemas.get(i) {
+                    validate_value(
+                        item,
+                        ith_schema,
+                        defs,
+                        &format!("{path}[{i}]"),
+                        true,
+                        equals,
+                        errors,
+                        depth,
+                    );
+                }
+            }
+        } else {
+            for (i, item) in arr.iter().enumerate() {
+                validate_value(
+                    item,
+                    items_schema,
+                    defs,
+                    &format!("{path}[{i}]"),
+                    true,
+                    equals,
+                    errors,
+                    depth,
+                );
+            }
         }
     }
 }
@@ -637,12 +686,23 @@ fn validate_object(
 }
 
 fn is_type(schema: &Value, ty: &str) -> bool {
-    schema.get("type").and_then(Value::as_str) == Some(ty)
+    match schema.get("type") {
+        Some(Value::String(s)) => s == ty,
+        Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(ty)),
+        _ => false,
+    }
 }
 
 fn expected_type(schema: &Value) -> String {
-    if let Some(ty) = schema.get("type").and_then(Value::as_str) {
-        return ty.to_owned();
+    match schema.get("type") {
+        Some(Value::String(ty)) => return ty.clone(),
+        Some(Value::Array(arr)) => {
+            let types: Vec<&str> = arr.iter().filter_map(Value::as_str).collect();
+            if !types.is_empty() {
+                return format!("({})", types.join(" | "));
+            }
+        }
+        _ => {}
     }
     if schema.get("$ref").is_some() {
         return "referenced type".into();
@@ -931,5 +991,47 @@ mod tests {
         });
         assert!(validate(&json!({"a":"hi"}), &schema).is_success());
         assert!(!validate(&json!({"a":"hi","b":1}), &schema).is_success());
+    }
+
+    #[test]
+    fn one_of_requires_exactly_one_match() {
+        let schema = json!({
+            "oneOf":[
+                {"type":"string"},
+                {"type":"string","minLength":5}
+            ]
+        });
+        assert!(!validate(&json!("hello world"), &schema).is_success());
+        assert!(validate(&json!("hi"), &schema).is_success());
+    }
+
+    #[test]
+    fn any_of_passes_with_multiple_matches() {
+        let schema = json!({
+            "anyOf":[
+                {"type":"string"},
+                {"type":"string","minLength":5}
+            ]
+        });
+        assert!(validate(&json!("hello world"), &schema).is_success());
+        assert!(validate(&json!("hi"), &schema).is_success());
+    }
+
+    #[test]
+    fn type_array_support() {
+        let schema = json!({"type":["string","integer"]});
+        assert!(validate(&json!("hello"), &schema).is_success());
+        assert!(validate(&json!(42), &schema).is_success());
+        assert!(!validate(&json!(true), &schema).is_success());
+    }
+
+    #[test]
+    fn tuple_items_validation() {
+        let schema = json!({
+            "type":"array",
+            "items":[{"type":"string"},{"type":"integer"}]
+        });
+        assert!(validate(&json!(["a", 1]), &schema).is_success());
+        assert!(!validate(&json!(["a", "b"]), &schema).is_success());
     }
 }

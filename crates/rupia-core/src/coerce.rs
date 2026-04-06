@@ -26,6 +26,9 @@ fn coerce_value(value: Value, schema: &Value, defs: Option<&Value>, depth: u32) 
     if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
         return coerce_any_of(value, one_of, defs, depth);
     }
+    if schema.get("const").is_some() {
+        return value;
+    }
     if is_string_schema(schema) {
         return coerce_to_string(value, schema);
     }
@@ -549,5 +552,24 @@ mod tests {
             "$defs": { "A": { "$ref": "#/$defs/A" } }
         });
         assert_eq!(coerce_with_schema(json!("hello"), &schema), json!("hello"));
+    }
+
+    #[test]
+    fn const_skips_coercion() {
+        let schema = json!({"const": 42});
+        assert_eq!(coerce_with_schema(json!("42"), &schema), json!("42"));
+        assert_eq!(coerce_with_schema(json!(42), &schema), json!(42));
+    }
+
+    #[test]
+    fn default_violating_schema_is_filled_anyway() {
+        let schema = json!({
+            "type":"object",
+            "properties":{
+                "count":{"type":"integer","minimum":10,"default":5}
+            }
+        });
+        let result = coerce_with_schema(json!({}), &schema);
+        assert_eq!(result["count"], json!(5));
     }
 }
