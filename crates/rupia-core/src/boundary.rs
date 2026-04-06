@@ -1,4 +1,5 @@
-use serde_json::{json, Map, Value};
+use crate::schema_util;
+use serde_json::{json, Value};
 
 pub struct BoundaryCase {
     pub field: String,
@@ -7,100 +8,9 @@ pub struct BoundaryCase {
     pub expected_valid: Option<bool>,
 }
 
-const MAX_DEPTH: u32 = 16;
-
-fn resolve_schema<'a>(schema: &'a Value, defs: Option<&'a Value>) -> Option<&'a Value> {
-    let ref_str = schema.get("$ref").and_then(Value::as_str)?;
-    let defs = defs?;
-    let name = ref_str.rsplit_once('/').map_or(ref_str, |(_, n)| n);
-    defs.get(name)
-}
-
-fn find_defs(root: &Value) -> Option<&Value> {
-    root.get("$defs").or_else(|| root.get("definitions"))
-}
-
-fn merge_all_of(sub_schemas: &[Value], defs: Option<&Value>) -> Value {
-    let mut merged_props = Map::new();
-    let mut merged_required = vec![];
-    for sub in sub_schemas {
-        let resolved = resolve_schema(sub, defs).unwrap_or(sub);
-        if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
-            for (k, v) in props {
-                merged_props.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(req) = resolved.get("required").and_then(Value::as_array) {
-            for r in req {
-                if let Some(s) = r.as_str() {
-                    merged_required.push(Value::String(s.to_owned()));
-                }
-            }
-        }
-    }
-    let mut result = json!({"type": "object"});
-    if !merged_props.is_empty() {
-        result["properties"] = Value::Object(merged_props);
-    }
-    if !merged_required.is_empty() {
-        result["required"] = Value::Array(merged_required);
-    }
-    result
-}
-
-fn collect_properties(
-    schema: &Value,
-    defs: Option<&Value>,
-    prefix: &str,
-    depth: u32,
-) -> Vec<(String, Value)> {
-    if depth > MAX_DEPTH {
-        return vec![];
-    }
-    let resolved = resolve_schema(schema, defs).unwrap_or(schema);
-    if let Some(all_of) = resolved.get("allOf").and_then(Value::as_array) {
-        let merged = merge_all_of(all_of, defs);
-        return collect_properties(&merged, defs, prefix, depth + 1);
-    }
-    if let Some(variants) = resolved
-        .get("oneOf")
-        .or_else(|| resolved.get("anyOf"))
-        .and_then(Value::as_array)
-    {
-        let mut result = vec![];
-        for variant in variants {
-            result.extend(collect_properties(variant, defs, prefix, depth + 1));
-        }
-        return result;
-    }
-    let Some(props) = resolved.get("properties").and_then(Value::as_object) else {
-        return vec![];
-    };
-    let mut result = vec![];
-    for (field, prop_schema) in props {
-        let path = if prefix.is_empty() {
-            field.clone()
-        } else {
-            format!("{prefix}.{field}")
-        };
-        let prop_resolved = resolve_schema(prop_schema, defs).unwrap_or(prop_schema);
-        let typ = prop_resolved
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if typ == "object" || prop_resolved.get("properties").is_some() {
-            result.extend(collect_properties(prop_resolved, defs, &path, depth + 1));
-        } else {
-            result.push((path, prop_resolved.clone()));
-        }
-    }
-    result
-}
-
 pub fn generate_boundary_cases(schema: &Value) -> Vec<BoundaryCase> {
     let mut cases = vec![];
-    let defs = find_defs(schema);
-    let flat_props = collect_properties(schema, defs, "", 0);
+    let flat_props = schema_util::flatten_properties(schema, schema);
     let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)

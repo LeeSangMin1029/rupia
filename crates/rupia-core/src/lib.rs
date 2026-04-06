@@ -12,5 +12,6 @@ pub mod diagnostic;
 pub mod guard;
 pub mod ave;
 pub mod boundary;
+pub mod schema_util;
 pub mod registry;
 pub mod task_schemas;
