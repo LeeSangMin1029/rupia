@@ -490,6 +490,660 @@ fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct CrossRefResult {
+    pub universal_enums: Vec<UniversalEnum>,
+    pub universal_constraints: Vec<UniversalConstraint>,
+    pub divergences: Vec<Divergence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UniversalEnum {
+    pub field_pattern: String,
+    pub common_values: Vec<String>,
+    pub all_values: Vec<String>,
+    pub source_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UniversalConstraint {
+    pub field_pattern: String,
+    pub constraint_type: String,
+    pub value: String,
+    pub agreement: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Divergence {
+    pub field_pattern: String,
+    pub description: String,
+}
+
+pub fn cross_reference_schemas(schemas: &[Value]) -> CrossRefResult {
+    if schemas.is_empty() {
+        return CrossRefResult {
+            universal_enums: vec![],
+            universal_constraints: vec![],
+            divergences: vec![],
+        };
+    }
+    let all_flat: Vec<HashMap<String, Value>> =
+        schemas.iter().map(|s| flatten_properties(s, "")).collect();
+    let mut field_sources: HashMap<String, Vec<&Value>> = HashMap::new();
+    for flat in &all_flat {
+        for (key, val) in flat {
+            field_sources.entry(key.clone()).or_default().push(val);
+        }
+    }
+    let mut universal_enums = Vec::new();
+    let mut universal_constraints = Vec::new();
+    let mut divergences = Vec::new();
+    for (field, sources) in &field_sources {
+        let total = sources.len();
+        collect_enum_info(
+            field,
+            sources,
+            total,
+            &mut universal_enums,
+            &mut divergences,
+        );
+        collect_numeric_constraints(
+            field,
+            sources,
+            total,
+            &mut universal_constraints,
+            &mut divergences,
+        );
+        collect_format_constraints(
+            field,
+            sources,
+            total,
+            &mut universal_constraints,
+            &mut divergences,
+        );
+        collect_required_constraints(field, sources, total, schemas, &mut universal_constraints);
+        collect_type_constraints(
+            field,
+            sources,
+            total,
+            &mut universal_constraints,
+            &mut divergences,
+        );
+    }
+    CrossRefResult {
+        universal_enums,
+        universal_constraints,
+        divergences,
+    }
+}
+
+fn flatten_properties(schema: &Value, prefix: &str) -> HashMap<String, Value> {
+    let mut result = HashMap::new();
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return result;
+    };
+    for (key, val) in props {
+        let full_key = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        result.insert(full_key.clone(), val.clone());
+        if val.get("properties").is_some() {
+            result.extend(flatten_properties(val, &full_key));
+        }
+    }
+    result
+}
+
+fn collect_enum_info(
+    field: &str,
+    sources: &[&Value],
+    total: usize,
+    enums: &mut Vec<UniversalEnum>,
+    divergences: &mut Vec<Divergence>,
+) {
+    let enum_sets: Vec<Vec<String>> = sources
+        .iter()
+        .filter_map(|v| {
+            v.get("enum").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .collect();
+    if enum_sets.is_empty() {
+        return;
+    }
+    let mut all_values: Vec<String> = enum_sets.iter().flatten().cloned().collect();
+    all_values.sort();
+    all_values.dedup();
+    let common_values: Vec<String> = all_values
+        .iter()
+        .filter(|v| enum_sets.iter().all(|s| s.contains(v)))
+        .cloned()
+        .collect();
+    if common_values.len() < all_values.len() {
+        let only_some: Vec<&String> = all_values
+            .iter()
+            .filter(|v| !common_values.contains(v))
+            .collect();
+        divergences.push(Divergence {
+            field_pattern: field.to_owned(),
+            description: format!(
+                "enum values not universal: [{}]",
+                only_some
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    enums.push(UniversalEnum {
+        field_pattern: field.to_owned(),
+        common_values,
+        all_values,
+        source_count: total,
+    });
+}
+
+fn collect_numeric_constraints(
+    field: &str,
+    sources: &[&Value],
+    total: usize,
+    constraints: &mut Vec<UniversalConstraint>,
+    divergences: &mut Vec<Divergence>,
+) {
+    let mins: Vec<f64> = sources
+        .iter()
+        .filter_map(|v| v.get("minimum").and_then(Value::as_f64))
+        .collect();
+    let maxs: Vec<f64> = sources
+        .iter()
+        .filter_map(|v| v.get("maximum").and_then(Value::as_f64))
+        .collect();
+    if !mins.is_empty() {
+        let all_same = mins.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
+        if all_same {
+            constraints.push(UniversalConstraint {
+                field_pattern: field.to_owned(),
+                constraint_type: "minimum".to_owned(),
+                value: format!("{}", mins[0]),
+                agreement: mins.len(),
+                total,
+            });
+        } else {
+            divergences.push(Divergence {
+                field_pattern: field.to_owned(),
+                description: format!("minimum differs: {mins:?}"),
+            });
+        }
+    }
+    if !maxs.is_empty() {
+        let all_same = maxs.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
+        if all_same {
+            constraints.push(UniversalConstraint {
+                field_pattern: field.to_owned(),
+                constraint_type: "maximum".to_owned(),
+                value: format!("{}", maxs[0]),
+                agreement: maxs.len(),
+                total,
+            });
+        } else {
+            divergences.push(Divergence {
+                field_pattern: field.to_owned(),
+                description: format!("maximum differs: {maxs:?}"),
+            });
+        }
+    }
+}
+
+fn collect_format_constraints(
+    field: &str,
+    sources: &[&Value],
+    total: usize,
+    constraints: &mut Vec<UniversalConstraint>,
+    divergences: &mut Vec<Divergence>,
+) {
+    let formats: Vec<&str> = sources
+        .iter()
+        .filter_map(|v| v.get("format").and_then(Value::as_str))
+        .collect();
+    if formats.is_empty() {
+        return;
+    }
+    let all_same = formats.windows(2).all(|w| w[0] == w[1]);
+    if all_same {
+        constraints.push(UniversalConstraint {
+            field_pattern: field.to_owned(),
+            constraint_type: "format".to_owned(),
+            value: formats[0].to_owned(),
+            agreement: formats.len(),
+            total,
+        });
+    } else {
+        divergences.push(Divergence {
+            field_pattern: field.to_owned(),
+            description: format!("format differs: {formats:?}"),
+        });
+    }
+}
+
+fn collect_required_constraints(
+    field: &str,
+    _sources: &[&Value],
+    total: usize,
+    schemas: &[Value],
+    constraints: &mut Vec<UniversalConstraint>,
+) {
+    let leaf = field.rsplit('.').next().unwrap_or(field);
+    let parent_prefix = if field.contains('.') {
+        &field[..field.len() - leaf.len() - 1]
+    } else {
+        ""
+    };
+    let required_count = schemas
+        .iter()
+        .filter(|s| {
+            let target = if parent_prefix.is_empty() {
+                (*s).clone()
+            } else {
+                navigate_to_nested(s, parent_prefix)
+            };
+            target
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(leaf)))
+        })
+        .count();
+    if required_count > 0 {
+        constraints.push(UniversalConstraint {
+            field_pattern: field.to_owned(),
+            constraint_type: "required".to_owned(),
+            value: "true".to_owned(),
+            agreement: required_count,
+            total,
+        });
+    }
+}
+
+fn navigate_to_nested(schema: &Value, dotpath: &str) -> Value {
+    let mut current = schema.clone();
+    for seg in dotpath.split('.') {
+        current = current
+            .get("properties")
+            .and_then(|p| p.get(seg))
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
+    current
+}
+
+fn collect_type_constraints(
+    field: &str,
+    sources: &[&Value],
+    total: usize,
+    constraints: &mut Vec<UniversalConstraint>,
+    divergences: &mut Vec<Divergence>,
+) {
+    let types: Vec<&str> = sources
+        .iter()
+        .filter_map(|v| v.get("type").and_then(Value::as_str))
+        .collect();
+    if types.is_empty() {
+        return;
+    }
+    let all_same = types.windows(2).all(|w| w[0] == w[1]);
+    if all_same {
+        constraints.push(UniversalConstraint {
+            field_pattern: field.to_owned(),
+            constraint_type: "type".to_owned(),
+            value: types[0].to_owned(),
+            agreement: types.len(),
+            total,
+        });
+    } else {
+        divergences.push(Divergence {
+            field_pattern: field.to_owned(),
+            description: format!("type differs: {types:?}"),
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsistencyResult {
+    pub consistent: bool,
+    pub conflicts: Vec<RuleConflict>,
+    pub satisfying_example: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuleConflict {
+    pub rule_a: String,
+    pub rule_b: String,
+    pub reason: String,
+}
+
+use crate::ave::FieldRelation;
+
+pub fn check_rule_consistency(rules: &[FieldRelation], schema: &Value) -> ConsistencyResult {
+    let mut bounds = extract_bounds_from_schema(schema);
+    let mut conflicts = Vec::new();
+    propagate_ordering_rules(rules, &mut bounds, &mut conflicts);
+    detect_ordering_cycles(rules, &mut conflicts);
+    check_arithmetic_rules(rules, &bounds, &mut conflicts);
+    let consistent = conflicts.is_empty();
+    let satisfying_example = if consistent {
+        Some(generate_satisfying_example(&bounds, schema))
+    } else {
+        None
+    };
+    ConsistencyResult {
+        consistent,
+        conflicts,
+        satisfying_example,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FieldBounds {
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+fn extract_bounds_from_schema(schema: &Value) -> HashMap<String, FieldBounds> {
+    let mut bounds = HashMap::new();
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return bounds;
+    };
+    for (key, val) in props {
+        let min = val.get("minimum").and_then(Value::as_f64);
+        let max = val.get("maximum").and_then(Value::as_f64);
+        if min.is_some() || max.is_some() {
+            bounds.insert(key.clone(), FieldBounds { min, max });
+        } else {
+            bounds.insert(
+                key.clone(),
+                FieldBounds {
+                    min: None,
+                    max: None,
+                },
+            );
+        }
+    }
+    bounds
+}
+
+fn propagate_ordering_rules(
+    rules: &[FieldRelation],
+    bounds: &mut HashMap<String, FieldBounds>,
+    conflicts: &mut Vec<RuleConflict>,
+) {
+    let max_iterations = rules.len() * 3 + 1;
+    for _ in 0..max_iterations {
+        let mut changed = false;
+        for rule in rules {
+            let op = rule.operator.as_str();
+            match op {
+                "lte" | "lt" => {
+                    let b_max = bounds.get(&rule.field_b).and_then(|b| b.max);
+                    if let Some(bmax) = b_max {
+                        let entry = bounds.entry(rule.field_a.clone()).or_insert(FieldBounds {
+                            min: None,
+                            max: None,
+                        });
+                        let effective = if op == "lt" { bmax - 1.0 } else { bmax };
+                        if entry.max.is_none() || entry.max.is_some_and(|m| m > effective) {
+                            entry.max = Some(effective);
+                            changed = true;
+                        }
+                    }
+                    let a_min = bounds.get(&rule.field_a).and_then(|b| b.min);
+                    if let Some(amin) = a_min {
+                        let entry = bounds.entry(rule.field_b.clone()).or_insert(FieldBounds {
+                            min: None,
+                            max: None,
+                        });
+                        let effective = if op == "lt" { amin + 1.0 } else { amin };
+                        if entry.min.is_none() || entry.min.is_some_and(|m| m < effective) {
+                            entry.min = Some(effective);
+                            changed = true;
+                        }
+                    }
+                }
+                "gte" | "gt" => {
+                    let b_min = bounds.get(&rule.field_b).and_then(|b| b.min);
+                    if let Some(bmin) = b_min {
+                        let entry = bounds.entry(rule.field_a.clone()).or_insert(FieldBounds {
+                            min: None,
+                            max: None,
+                        });
+                        let effective = if op == "gt" { bmin + 1.0 } else { bmin };
+                        if entry.min.is_none() || entry.min.is_some_and(|m| m < effective) {
+                            entry.min = Some(effective);
+                            changed = true;
+                        }
+                    }
+                    let a_max = bounds.get(&rule.field_a).and_then(|b| b.max);
+                    if let Some(amax) = a_max {
+                        let entry = bounds.entry(rule.field_b.clone()).or_insert(FieldBounds {
+                            min: None,
+                            max: None,
+                        });
+                        let effective = if op == "gt" { amax - 1.0 } else { amax };
+                        if entry.max.is_none() || entry.max.is_some_and(|m| m > effective) {
+                            entry.max = Some(effective);
+                            changed = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for (field, fb) in bounds.iter() {
+        if let (Some(lo), Some(hi)) = (fb.min, fb.max) {
+            if lo > hi {
+                conflicts.push(RuleConflict {
+                    rule_a: format!("{field}.min = {lo}"),
+                    rule_b: format!("{field}.max = {hi}"),
+                    reason: format!("range conflict: {field} requires min({lo}) <= max({hi})"),
+                });
+            }
+        }
+    }
+}
+
+fn detect_ordering_cycles(rules: &[FieldRelation], conflicts: &mut Vec<RuleConflict>) {
+    let ordering_ops = ["lt", "lte", "gt", "gte"];
+    let mut edges: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for rule in rules {
+        if !ordering_ops.contains(&rule.operator.as_str()) {
+            continue;
+        }
+        let (from, to, op) = match rule.operator.as_str() {
+            "lt" | "lte" => (
+                rule.field_a.clone(),
+                rule.field_b.clone(),
+                rule.operator.clone(),
+            ),
+            "gt" | "gte" => (rule.field_b.clone(), rule.field_a.clone(), {
+                match rule.operator.as_str() {
+                    "gt" => "lt".to_owned(),
+                    _ => "lte".to_owned(),
+                }
+            }),
+            _ => continue,
+        };
+        edges.entry(from).or_default().push((to, op));
+    }
+    let nodes: Vec<String> = edges.keys().cloned().collect();
+    for start in &nodes {
+        let mut visited = HashMap::new();
+        let mut stack = vec![(start.clone(), false)];
+        while let Some((node, is_strict)) = stack.pop() {
+            if &node == start && visited.contains_key(start) {
+                if is_strict {
+                    conflicts.push(RuleConflict {
+                        rule_a: format!("{start} < ... < {start}"),
+                        rule_b: String::new(),
+                        reason: format!("cycle conflict: strict ordering cycle through {start}"),
+                    });
+                }
+                continue;
+            }
+            if visited.contains_key(&node) {
+                continue;
+            }
+            visited.insert(node.clone(), is_strict);
+            if let Some(neighbors) = edges.get(&node) {
+                for (next, op) in neighbors {
+                    let strict = is_strict || op == "lt";
+                    stack.push((next.clone(), strict));
+                }
+            }
+        }
+    }
+}
+
+fn check_arithmetic_rules(
+    rules: &[FieldRelation],
+    bounds: &HashMap<String, FieldBounds>,
+    conflicts: &mut Vec<RuleConflict>,
+) {
+    for rule in rules {
+        if rule.operator != "eq" {
+            continue;
+        }
+        if !rule.field_b.contains('+') && !rule.field_b.contains('-') {
+            continue;
+        }
+        let parts: Vec<(f64, &str)> = parse_arithmetic_expr(&rule.field_b);
+        if parts.is_empty() {
+            continue;
+        }
+        let target_bounds = bounds.get(&rule.field_a);
+        let mut sum_min: f64 = 0.0;
+        let mut sum_max: f64 = 0.0;
+        let mut all_bounded = true;
+        for (sign, field) in &parts {
+            if let Some(fb) = bounds.get(*field) {
+                if *sign > 0.0 {
+                    sum_min += fb.min.unwrap_or(f64::NEG_INFINITY);
+                    sum_max += fb.max.unwrap_or(f64::INFINITY);
+                } else {
+                    sum_min += fb.max.map_or(f64::NEG_INFINITY, |m| -m);
+                    sum_max += fb.min.map_or(f64::INFINITY, |m| -m);
+                }
+            } else {
+                all_bounded = false;
+            }
+        }
+        if !all_bounded {
+            continue;
+        }
+        if let Some(tb) = target_bounds {
+            if let Some(tmax) = tb.max {
+                if sum_min > tmax {
+                    conflicts.push(RuleConflict {
+                        rule_a: format!("{} = {}", rule.field_a, rule.field_b),
+                        rule_b: format!("{}.max = {tmax}", rule.field_a),
+                        reason: format!(
+                            "arithmetic infeasibility: {} minimum possible value ({sum_min}) > {}.max ({tmax})",
+                            rule.field_b, rule.field_a
+                        ),
+                    });
+                }
+            }
+            if let Some(tmin) = tb.min {
+                if sum_max < tmin {
+                    conflicts.push(RuleConflict {
+                        rule_a: format!("{} = {}", rule.field_a, rule.field_b),
+                        rule_b: format!("{}.min = {tmin}", rule.field_a),
+                        reason: format!(
+                            "arithmetic infeasibility: {} maximum possible value ({sum_max}) < {}.min ({tmin})",
+                            rule.field_b, rule.field_a
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn parse_arithmetic_expr(expr: &str) -> Vec<(f64, &str)> {
+    let mut result = Vec::new();
+    let mut sign = 1.0_f64;
+    for token in expr.split_whitespace() {
+        match token {
+            "+" => sign = 1.0,
+            "-" => sign = -1.0,
+            field => {
+                result.push((sign, field));
+                sign = 1.0;
+            }
+        }
+    }
+    result
+}
+
+fn generate_satisfying_example(bounds: &HashMap<String, FieldBounds>, schema: &Value) -> Value {
+    let mut obj = serde_json::Map::new();
+    let props = schema.get("properties").and_then(Value::as_object);
+    let fields: Vec<&String> = if let Some(p) = props {
+        p.keys().collect()
+    } else {
+        bounds.keys().collect()
+    };
+    for field in fields {
+        let val = if let Some(fb) = bounds.get(field) {
+            match (fb.min, fb.max) {
+                (Some(lo), Some(hi)) => f64::midpoint(lo, hi),
+                (Some(lo), None) => lo + 1.0,
+                (None, Some(hi)) => hi - 1.0,
+                (None, None) => 0.0,
+            }
+        } else {
+            let field_type = props
+                .and_then(|p| p.get(field))
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("number");
+            match field_type {
+                "string" => {
+                    obj.insert(field.clone(), Value::String("example".to_owned()));
+                    continue;
+                }
+                "boolean" => {
+                    obj.insert(field.clone(), Value::Bool(true));
+                    continue;
+                }
+                _ => 0.0,
+            }
+        };
+        let prop_type = props
+            .and_then(|p| p.get(field))
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "satisfying example: mid-range values won't overflow i64"
+        )]
+        if prop_type == Some("integer") {
+            obj.insert(field.clone(), serde_json::json!(val as i64));
+        } else {
+            obj.insert(field.clone(), serde_json::json!(val));
+        }
+    }
+    Value::Object(obj)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,5 +1282,166 @@ mod tests {
         assert_eq!(tools[1]["name"], "createUser");
         assert!(tools[0]["parameters"]["properties"]["limit"]["type"] == "integer");
         assert!(tools[1]["parameters"]["properties"]["name"]["type"] == "string");
+    }
+
+    #[test]
+    fn cross_ref_overlapping_enums() {
+        let s1 = json!({
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "paid", "shipped", "cancelled"]},
+                "payment_status": {"type": "string", "enum": ["pending", "completed", "failed"]}
+            },
+            "required": ["status"]
+        });
+        let s2 = json!({
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "paid", "delivered"]},
+                "payment_status": {"type": "string", "enum": ["pending", "completed", "refunded"]}
+            },
+            "required": ["status"]
+        });
+        let s3 = json!({
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "paid", "returned"]},
+                "payment_status": {"type": "string", "enum": ["pending", "completed"]}
+            },
+            "required": ["status", "payment_status"]
+        });
+        let result = cross_reference_schemas(&[s1, s2, s3]);
+        let status_enum = result
+            .universal_enums
+            .iter()
+            .find(|e| e.field_pattern == "status");
+        assert!(status_enum.is_some());
+        let se = status_enum.unwrap();
+        assert!(se.common_values.contains(&"pending".to_owned()));
+        assert!(se.common_values.contains(&"paid".to_owned()));
+        assert!(!se.common_values.contains(&"shipped".to_owned()));
+        assert!(se.all_values.len() > se.common_values.len());
+    }
+
+    #[test]
+    fn cross_ref_price_divergence() {
+        let s1 = json!({
+            "properties": {
+                "price": {"type": "number", "minimum": 0, "maximum": 10000}
+            }
+        });
+        let s2 = json!({
+            "properties": {
+                "price": {"type": "number", "minimum": 0, "maximum": 99999}
+            }
+        });
+        let result = cross_reference_schemas(&[s1, s2]);
+        let min_constraint = result
+            .universal_constraints
+            .iter()
+            .find(|c| c.field_pattern == "price" && c.constraint_type == "minimum");
+        assert!(min_constraint.is_some());
+        assert_eq!(min_constraint.unwrap().agreement, 2);
+        let max_divergence = result
+            .divergences
+            .iter()
+            .find(|d| d.field_pattern == "price" && d.description.contains("maximum"));
+        assert!(max_divergence.is_some());
+    }
+
+    #[test]
+    fn cross_ref_universal_required() {
+        let s1 = json!({"properties": {"id": {"type": "string"}, "name": {"type": "string"}}, "required": ["id", "name"]});
+        let s2 = json!({"properties": {"id": {"type": "string"}, "name": {"type": "string"}}, "required": ["id"]});
+        let s3 = json!({"properties": {"id": {"type": "string"}}, "required": ["id"]});
+        let result = cross_reference_schemas(&[s1, s2, s3]);
+        let id_req = result
+            .universal_constraints
+            .iter()
+            .find(|c| c.field_pattern == "id" && c.constraint_type == "required");
+        assert!(id_req.is_some());
+        assert_eq!(id_req.unwrap().agreement, 3);
+    }
+
+    #[test]
+    fn consistency_compatible_rules() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "start": {"type": "integer", "minimum": 0, "maximum": 100},
+                "end": {"type": "integer", "minimum": 0, "maximum": 100}
+            }
+        });
+        let rules = vec![FieldRelation {
+            field_a: "start".into(),
+            operator: "lte".into(),
+            field_b: "end".into(),
+        }];
+        let result = check_rule_consistency(&rules, &schema);
+        assert!(result.consistent);
+        assert!(result.satisfying_example.is_some());
+        assert!(result.conflicts.is_empty());
+    }
+
+    #[test]
+    fn consistency_cycle_conflict() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer", "minimum": 0, "maximum": 100},
+                "b": {"type": "integer", "minimum": 0, "maximum": 100}
+            }
+        });
+        let rules = vec![
+            FieldRelation {
+                field_a: "a".into(),
+                operator: "lt".into(),
+                field_b: "b".into(),
+            },
+            FieldRelation {
+                field_a: "b".into(),
+                operator: "lt".into(),
+                field_b: "a".into(),
+            },
+        ];
+        let result = check_rule_consistency(&rules, &schema);
+        assert!(!result.consistent);
+        assert!(!result.conflicts.is_empty());
+    }
+
+    #[test]
+    fn consistency_range_contradiction() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer", "minimum": 100, "maximum": 50}
+            }
+        });
+        let rules: Vec<FieldRelation> = vec![];
+        let result = check_rule_consistency(&rules, &schema);
+        assert!(!result.consistent);
+        let conflict = &result.conflicts[0];
+        assert!(conflict.reason.contains("range conflict"));
+    }
+
+    #[test]
+    fn consistency_arithmetic_infeasibility() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "total": {"type": "number", "minimum": 0, "maximum": 10},
+                "a": {"type": "number", "minimum": 50, "maximum": 100},
+                "b": {"type": "number", "minimum": 50, "maximum": 100}
+            }
+        });
+        let rules = vec![FieldRelation {
+            field_a: "total".into(),
+            operator: "eq".into(),
+            field_b: "a + b".into(),
+        }];
+        let result = check_rule_consistency(&rules, &schema);
+        assert!(!result.consistent);
+        let arith = result
+            .conflicts
+            .iter()
+            .find(|c| c.reason.contains("arithmetic"));
+        assert!(arith.is_some());
     }
 }
