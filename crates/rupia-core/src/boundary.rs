@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 pub struct BoundaryCase {
     pub field: String,
@@ -7,18 +7,106 @@ pub struct BoundaryCase {
     pub expected_valid: Option<bool>,
 }
 
+const MAX_DEPTH: u32 = 16;
+
+fn resolve_schema<'a>(schema: &'a Value, defs: Option<&'a Value>) -> Option<&'a Value> {
+    let ref_str = schema.get("$ref").and_then(Value::as_str)?;
+    let defs = defs?;
+    let name = ref_str.rsplit_once('/').map_or(ref_str, |(_, n)| n);
+    defs.get(name)
+}
+
+fn find_defs(root: &Value) -> Option<&Value> {
+    root.get("$defs").or_else(|| root.get("definitions"))
+}
+
+fn merge_all_of(sub_schemas: &[Value], defs: Option<&Value>) -> Value {
+    let mut merged_props = Map::new();
+    let mut merged_required = vec![];
+    for sub in sub_schemas {
+        let resolved = resolve_schema(sub, defs).unwrap_or(sub);
+        if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
+            for (k, v) in props {
+                merged_props.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(req) = resolved.get("required").and_then(Value::as_array) {
+            for r in req {
+                if let Some(s) = r.as_str() {
+                    merged_required.push(Value::String(s.to_owned()));
+                }
+            }
+        }
+    }
+    let mut result = json!({"type": "object"});
+    if !merged_props.is_empty() {
+        result["properties"] = Value::Object(merged_props);
+    }
+    if !merged_required.is_empty() {
+        result["required"] = Value::Array(merged_required);
+    }
+    result
+}
+
+fn collect_properties(
+    schema: &Value,
+    defs: Option<&Value>,
+    prefix: &str,
+    depth: u32,
+) -> Vec<(String, Value)> {
+    if depth > MAX_DEPTH {
+        return vec![];
+    }
+    let resolved = resolve_schema(schema, defs).unwrap_or(schema);
+    if let Some(all_of) = resolved.get("allOf").and_then(Value::as_array) {
+        let merged = merge_all_of(all_of, defs);
+        return collect_properties(&merged, defs, prefix, depth + 1);
+    }
+    if let Some(variants) = resolved
+        .get("oneOf")
+        .or_else(|| resolved.get("anyOf"))
+        .and_then(Value::as_array)
+    {
+        let mut result = vec![];
+        for variant in variants {
+            result.extend(collect_properties(variant, defs, prefix, depth + 1));
+        }
+        return result;
+    }
+    let Some(props) = resolved.get("properties").and_then(Value::as_object) else {
+        return vec![];
+    };
+    let mut result = vec![];
+    for (field, prop_schema) in props {
+        let path = if prefix.is_empty() {
+            field.clone()
+        } else {
+            format!("{prefix}.{field}")
+        };
+        let prop_resolved = resolve_schema(prop_schema, defs).unwrap_or(prop_schema);
+        let typ = prop_resolved
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if typ == "object" || prop_resolved.get("properties").is_some() {
+            result.extend(collect_properties(prop_resolved, defs, &path, depth + 1));
+        } else {
+            result.push((path, prop_resolved.clone()));
+        }
+    }
+    result
+}
+
 pub fn generate_boundary_cases(schema: &Value) -> Vec<BoundaryCase> {
     let mut cases = vec![];
-    let properties = schema.get("properties").and_then(Value::as_object);
+    let defs = find_defs(schema);
+    let flat_props = collect_properties(schema, defs, "", 0);
     let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let Some(props) = properties else {
-        return cases;
-    };
-    for (field, prop_schema) in props {
+    for (field, prop_schema) in &flat_props {
         let typ = prop_schema
             .get("type")
             .and_then(Value::as_str)
@@ -391,6 +479,169 @@ mod tests {
         assert!(cases
             .iter()
             .any(|c| c.description.contains("safe") && c.expected_valid == Some(true)));
+    }
+
+    #[test]
+    fn nested_object_boundaries() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "age": {"type": "integer", "minimum": 0, "maximum": 150}
+                    }
+                }
+            }
+        });
+        let cases = generate_boundary_cases(&schema);
+        let age_cases: Vec<_> = cases.iter().filter(|c| c.field == "user.age").collect();
+        assert!(
+            !age_cases.is_empty(),
+            "nested object should produce user.age boundaries, got fields: {:?}",
+            cases.iter().map(|c| &c.field).collect::<Vec<_>>()
+        );
+        let values: Vec<i64> = age_cases.iter().filter_map(|c| c.value.as_i64()).collect();
+        assert!(values.contains(&0), "should have min boundary 0");
+        assert!(values.contains(&150), "should have max boundary 150");
+    }
+
+    #[test]
+    fn double_nested_boundaries() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {
+                        "b": {
+                            "type": "object",
+                            "properties": {
+                                "c": {"type": "integer", "minimum": 10}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let cases = generate_boundary_cases(&schema);
+        let c_cases: Vec<_> = cases.iter().filter(|c| c.field == "a.b.c").collect();
+        assert!(
+            !c_cases.is_empty(),
+            "double-nested should produce a.b.c boundaries, got fields: {:?}",
+            cases.iter().map(|c| &c.field).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn allof_boundaries() {
+        let schema = json!({
+            "type": "object",
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1}
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "age": {"type": "integer", "minimum": 0}
+                    }
+                }
+            ]
+        });
+        let cases = generate_boundary_cases(&schema);
+        let fields: Vec<&str> = cases.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            fields.contains(&"name"),
+            "allOf should produce name boundaries, got: {fields:?}"
+        );
+        assert!(
+            fields.contains(&"age"),
+            "allOf should produce age boundaries, got: {fields:?}"
+        );
+    }
+
+    #[test]
+    fn ref_boundaries() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "address": {"$ref": "#/$defs/Address"}
+            },
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "properties": {
+                        "zip": {"type": "string", "minLength": 5, "maxLength": 5}
+                    }
+                }
+            }
+        });
+        let cases = generate_boundary_cases(&schema);
+        let zip_cases: Vec<_> = cases.iter().filter(|c| c.field == "address.zip").collect();
+        assert!(
+            !zip_cases.is_empty(),
+            "$ref should produce address.zip boundaries, got fields: {:?}",
+            cases.iter().map(|c| &c.field).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn oneof_boundaries() {
+        let schema = json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "width": {"type": "integer", "minimum": 1}
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "radius": {"type": "integer", "minimum": 0}
+                    }
+                }
+            ]
+        });
+        let cases = generate_boundary_cases(&schema);
+        let fields: Vec<&str> = cases.iter().map(|c| c.field.as_str()).collect();
+        assert!(
+            fields.contains(&"width"),
+            "oneOf should produce width boundaries, got: {fields:?}"
+        );
+        assert!(
+            fields.contains(&"radius"),
+            "oneOf should produce radius boundaries, got: {fields:?}"
+        );
+    }
+
+    #[test]
+    fn circular_ref_no_hang() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "node": {"$ref": "#/$defs/Node"}
+            },
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer", "minimum": 0},
+                        "child": {"$ref": "#/$defs/Node"}
+                    }
+                }
+            }
+        });
+        let cases = generate_boundary_cases(&schema);
+        assert!(
+            !cases.is_empty(),
+            "circular ref should still produce some boundaries"
+        );
     }
 
     #[test]
