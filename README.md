@@ -7,134 +7,103 @@ rupia fixes what it can, validates the rest, and generates precise feedback so t
 
 **6.75% → 100% convergence** — the same pattern that makes Typia work for TypeScript.
 
-## Quick Start
+## Complete Feature Table
 
-### Rust Library
+### Core Pipeline
 
-```rust
-use rupia::{Harness, HasSchema, parse_validate_typed};
-use schemars::JsonSchema;
-use serde::Deserialize;
+| Feature | Module | What It Does |
+|---------|--------|-------------|
+| Lenient Parse | `lenient` | Markdown block extraction, junk prefix skip, trailing comma, JS comments, unquoted keys, incomplete keywords (`tru`→`true`), unclosed brackets, unicode surrogate pairs |
+| Coerce (10 types) | `coerce` | `"42"`→`42`, `"true"`→`true`, enum case insensitive, single→array wrap, default fill, string trim, number separators (`"1,000"`→`1000`), `"1.5k"`→`1500`, indexed object→array, enum number/string cross-convert |
+| Validate | `validator` | JSON Schema: type, range (min/max/exclusive), format (22 types), enum, required, oneOf/anyOf, x-discriminator, uniqueItems |
+| Feedback | `feedback` | `// ❌ [{"path":"$input.age","expected":"number & Minimum<0>"}]` inline annotations, missing property detection, array element placeholders |
+| Guard | `guard` | Production pipeline: size limit, timeout, verbose, diagnostics (RUPIA error codes), self-healing loop |
 
-#[derive(Deserialize, JsonSchema, Harness)]
-struct TaskOutput {
-    task_id: String,
-    status: String,
-    changed_files: Vec<String>,
-}
+### Format Validators (22 types, Typia regex 1:1)
 
-let raw = r#"{"task_id": "T001", "status": "done", "changed_files": ["src/lib.rs"]}"#;
-let output: TaskOutput = parse_validate_typed(raw).unwrap();
-```
+| Format | Format | Format | Format |
+|--------|--------|--------|--------|
+| email | idn-email | uri | url |
+| uri-reference | uri-template | iri | iri-reference |
+| uuid | date-time | date | time |
+| duration | ipv4 | ipv6 | hostname |
+| idn-hostname | json-pointer | relative-json-pointer | byte (base64) |
+| regex | password | | |
 
-### CLI (Go, Python, any language)
+### LLM Function Calling
+
+| Feature | What It Does |
+|---------|-------------|
+| `LlmFunction` | Schema + parse + validate + `to_openai_tool()` + `to_claude_tool()` |
+| `LlmApplication` | Function collection + `find()` + `to_openai_tools()` / `to_claude_tools()` |
+| `LlmController<T>` | Instance + dispatch + `execute()` / `execute_raw()` with auto coerce + validate |
+
+### AVE (Adaptive Validation Engine)
+
+| Phase | Feature | What It Does |
+|-------|---------|-------------|
+| 0 | Schema Resolution | Domain description → schema + relations + counterexamples (1 LLM call). 3-level summary (Haiku/Sonnet/Opus) |
+| 2-3 | Confidence Validation | Coerce + validate + per-field confidence score (deterministic, no LLM) |
+| 4 | Selective Retry | Failed fields only → LLM retry → merge into original → re-validate. Field group detection from relations |
+| 5 | Schema Evolution | Trace analysis → auto proposals. 3-tier approval: Auto (description), Async (enum add), Sync (type change). Direction-limited: no loosening |
+
+### Schema Operations
+
+| Feature | What It Does |
+|---------|-------------|
+| `inject_constraints_to_description` | Inject min/max/format/enum into description for LLM awareness |
+| `diff_schemas` | Compare old/new schemas, detect added/removed/changed fields, `is_compatible()` |
+| `make_partial` | Remove required (PATCH scenarios) |
+| `infer_schema` | Auto-infer schema from sample JSON values |
+| `compress_feedback` | Deduplicate repeated errors, reduce tokens |
+| `openapi_to_llm_tools` | OpenAPI paths → LLM function calling tools |
+| `ValidationStats` | Track field error frequencies, `prompt_hints()` for improvement suggestions |
+
+### Diagnostics
+
+| Code | Category | Example |
+|------|----------|---------|
+| RUPIA-P001~P006 | Parse | Empty input, no JSON, size limit, malformed, depth exceeded |
+| RUPIA-V001~V005 | Validation | Format violation, range, enum, required, type mismatch |
+| RUPIA-G001~G003 | Guard | Size limit, timeout, convergence failure |
+| RUPIA-S001~S004 | Schema | File not found, invalid JSON, missing type, no required |
+| AVE-E001~E007 | AVE | No domain, schema gen fail, retry exhausted, relation violation, merge cascade, stall, schema corrupt |
+
+### Other
+
+| Feature | What It Does |
+|---------|-------------|
+| `random::generate` | Schema-aware random data generation (respects format/min/max/enum) |
+| `#[derive(Harness)]` | Proc macro: Rust struct → JSON Schema via schemars |
+| `sanitize_feedback` | Prompt injection pattern filtering |
+| `is_stalled` | Detect 3 consecutive identical errors → early exit |
+| Trace (ring buffer) | Success: stats only. Failure: full context preserved |
+
+### CLI
 
 ```bash
-# Install
-cargo install --path crates/rupia-cli
-
-# Parse lenient JSON
-echo '{"name": "test", }' | rupia parse
-
-# Validate against schema
-echo '{"age": -5}' | rupia check --schema schema.json
-
-# Get LLM feedback
-echo '{"age": -5}' | rupia feedback --schema schema.json
-# Output:
-# ```json
-# {
-#   "age": -5 // ❌ [{"path":"$input.age","expected":"number & Minimum<0>"}]
-# }
-# ```
-
-# Lint your schema
-rupia lint-schema --schema schema.json
+rupia parse                           # Lenient JSON parse
+rupia check --schema X [--strict]     # Full pipeline + diagnostics
+rupia validate --schema X             # Schema validation + coerce
+rupia feedback --schema X             # // ❌ inline feedback
+rupia random --schema X --count N     # Schema-aware random data
+rupia lint-schema --schema X          # Schema quality check
+rupia ave --domain "shopping mall"    # AVE Phase 0: schema generation
+rupia ave --schema X --input Y        # AVE Phase 2-3: confidence validation
 ```
 
-### Self-Healing Loop
+## Stats
 
-```rust
-use rupia::{GuardConfig, guard};
+- **154 tests**, clippy clean
+- **14 modules**, ~6,700 lines (production + test)
+- **0 unsafe**, 0 panic, 0 network access
+- Full pipeline: **3.2µs** (valid), **4.4µs** (malformed)
 
-let result = guard::guarded_loop(
-    &schema,
-    |feedback| async {
-        call_llm(prompt, feedback).await
-    },
-    &GuardConfig::default(),
-).await?;
-// result.value — validated output
-// result.attempts — how many tries it took
-// result.diagnostics — any warnings
+## Install
+
+```bash
+cargo install --git https://github.com/LeeSangMin1029/rupia rupia-cli
 ```
-
-## What It Does
-
-| Stage | Typia Equivalent | What Happens |
-|-------|-----------------|--------------|
-| **Parse** | `parseLenientJson` | Strips markdown blocks, skips junk prefix, fixes trailing commas, completes partial keywords (`tru`→`true`), handles JS comments |
-| **Coerce** | `coerceLlmArguments` | `"42"`→`42` when schema expects number. Resolves `$ref`, discriminated unions |
-| **Validate** | `OpenApiStationValidator` | Checks types, ranges, formats (email/uri/uuid), required fields, enum values |
-| **Feedback** | `stringifyValidationFailure` | `// ❌ [{"path":"$input.age","expected":"number & Minimum<0>"}]` inline annotations |
-| **Guard** | — | Full pipeline + diagnostics with error codes (RUPIA-P001..V005..G003) |
-
-## Diagnostics
-
-Every error has a code, a message, and a **help** string that tells you exactly what to do:
-
-```
-[error][RUPIA-P002] LLM output contains no recognizable JSON
-  help: The output was not JSON and no JSON object/array was found.
-        First 100 chars: "Sure! I'll help you with that..."
-        Ensure your prompt asks for JSON output explicitly.
-        Try adding: "Respond with a JSON object only, no explanation."
-```
-
-Error codes:
-- `RUPIA-P0xx` — Parse errors (empty input, no JSON found, malformed, depth exceeded)
-- `RUPIA-V0xx` — Validation errors (format, range, enum, required, type mismatch)
-- `RUPIA-G0xx` — Guard errors (size limit, timeout, convergence failure)
-- `RUPIA-S0xx` — Schema errors (file not found, invalid JSON, missing type)
-
-## Performance
-
-| Operation | Size | Time | Throughput |
-|-----------|------|------|-----------|
-| Parse (valid JSON) | 56B | 675ns | 79 MiB/s |
-| Parse (malformed) | 160B | 1.7us | 89 MiB/s |
-| Full pipeline (valid) | 56B | 3.2us | — |
-| Full pipeline (malformed) | 160B | 4.4us | — |
-| Validate (50 items) | 4KB | 145us | — |
-| Feedback (3 errors) | — | 5.8us | — |
-
-## Go Integration
-
-rupia is language-agnostic via CLI + JSON Schema files. See `examples/go-integration/` for the pattern:
-
-1. Define Go struct → `go generate` → `schema.json`
-2. Pipe LLM output through `rupia check --schema schema.json`
-3. Parse result: `"valid"` → use data, `"invalid"` → feed `feedback` back to LLM
-
-## Project Structure
-
-```
-crates/
-  rupia-core/     — Parse, coerce, validate, feedback, guard, diagnostic
-  rupia-derive/   — #[derive(Harness)] proc macro
-  rupia-cli/      — CLI binary (rupia parse/check/validate/feedback/lint-schema)
-  rupia/          — Facade crate re-exporting everything
-```
-
-## Security
-
-- Zero `unsafe` code
-- Input size limit: 16MB (configurable)
-- Parse recursion depth limit: 512
-- No external process execution
-- No network access
-- Feedback strings sanitized against prompt injection
-- Memory-safe by Rust guarantees
 
 ## License
 
