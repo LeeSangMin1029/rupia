@@ -81,6 +81,12 @@ enum Command {
         #[arg(short, long)]
         schema: PathBuf,
     },
+    /// Generate boundary test cases from a JSON Schema
+    BoundaryGen {
+        /// JSON Schema file
+        #[arg(short, long)]
+        schema: PathBuf,
+    },
     /// AVE pipeline: schema-driven validation with confidence scoring
     Ave {
         /// Domain description for schema generation
@@ -115,6 +121,7 @@ fn main() -> ExitCode {
             json,
         } => cmd_check(&schema, input, strict, json, cli.verbose),
         Command::Random { schema, count } => cmd_random(&schema, count),
+        Command::BoundaryGen { schema } => cmd_boundary_gen(&schema),
         Command::LintSchema { schema } => cmd_lint_schema(&schema),
         Command::Ave {
             domain,
@@ -350,6 +357,24 @@ fn cmd_ave(
                 "status": format!("{:?}", r.status),
                 "confidence": r.confidence,
                 "coercion": r.coercion,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn cmd_boundary_gen(schema_path: &PathBuf) -> Result<()> {
+    let schema = load_schema(schema_path)?;
+    let cases = rupia_core::boundary::generate_boundary_cases(&schema);
+    let output: Vec<serde_json::Value> = cases
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "field": c.field,
+                "value": c.value,
+                "description": c.description,
+                "expected_valid": c.expected_valid,
             })
         })
         .collect();
