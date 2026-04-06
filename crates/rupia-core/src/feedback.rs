@@ -174,7 +174,14 @@ fn format_primitive(value: &Value) -> String {
         Value::Null => "null".to_owned(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::String(s) => format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        ),
         _ => value.to_string(),
     }
 }
@@ -306,5 +313,28 @@ mod tests {
         let result = stringify(&failure);
         assert!(result.contains("// ❌"));
         assert!(result.contains("$input.user.email"));
+    }
+
+    #[test]
+    fn newline_in_string_does_not_break_comment_alignment() {
+        let failure = ValidationFailure {
+            data: json!({"msg": "line1\nline2"}),
+            errors: vec![ValidationError {
+                path: "$input.msg".into(),
+                expected: "string & MaxLength<5>".into(),
+                value: json!("line1\nline2"),
+                description: None,
+            }],
+        };
+        let result = stringify(&failure);
+        assert!(result.contains(r#""line1\nline2""#));
+        for line in result.lines() {
+            if line.contains("// ❌") {
+                assert!(
+                    line.contains("msg"),
+                    "error comment should be on the same line as the key"
+                );
+            }
+        }
     }
 }

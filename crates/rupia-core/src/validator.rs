@@ -45,8 +45,13 @@ fn validate_value(
         && schema.get("$ref").is_none()
         && schema.get("anyOf").is_none()
         && schema.get("oneOf").is_none()
+        && schema.get("allOf").is_none()
+        && schema.get("not").is_none()
         && schema.get("const").is_none()
         && schema.get("enum").is_none()
+        && schema.get("if").is_none()
+        && schema.get("properties").is_none()
+        && schema.get("required").is_none()
     {
         return;
     }
@@ -57,6 +62,15 @@ fn validate_value(
                 expected: "non-circular $ref".into(),
                 value: value.clone(),
                 description: Some(format!("$ref depth exceeded {MAX_REF_DEPTH}")),
+            });
+            return;
+        }
+        if !r.starts_with("#/") {
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: "resolvable $ref".into(),
+                value: value.clone(),
+                description: Some(format!("External $ref not supported: {r}")),
             });
             return;
         }
@@ -92,6 +106,75 @@ fn validate_value(
                 errors,
                 depth,
             );
+            return;
+        }
+    }
+    if let Some(all) = schema.get("allOf").and_then(Value::as_array) {
+        for sub in all {
+            validate_value(value, sub, defs, path, required, equals, errors, depth);
+        }
+        return;
+    }
+    if let Some(not_schema) = schema.get("not") {
+        let mut sub_errors = Vec::new();
+        validate_value(
+            value,
+            not_schema,
+            defs,
+            path,
+            required,
+            equals,
+            &mut sub_errors,
+            depth,
+        );
+        if sub_errors.is_empty() {
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: "value NOT matching the sub-schema".into(),
+                value: value.clone(),
+                description: None,
+            });
+        }
+        return;
+    }
+    if let Some(if_schema) = schema.get("if") {
+        let mut if_errors = Vec::new();
+        validate_value(
+            value,
+            if_schema,
+            defs,
+            path,
+            required,
+            equals,
+            &mut if_errors,
+            depth,
+        );
+        if if_errors.is_empty() {
+            if let Some(then_schema) = schema.get("then") {
+                validate_value(
+                    value,
+                    then_schema,
+                    defs,
+                    path,
+                    required,
+                    equals,
+                    errors,
+                    depth,
+                );
+            }
+        } else if let Some(else_schema) = schema.get("else") {
+            validate_value(
+                value,
+                else_schema,
+                defs,
+                path,
+                required,
+                equals,
+                errors,
+                depth,
+            );
+        }
+        if schema.get("type").is_none() {
             return;
         }
     }
@@ -433,6 +516,10 @@ fn validate_array(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "patternProperties + additionalProperties checks"
+)]
 fn validate_object(
     obj: &serde_json::Map<String, Value>,
     schema: &Value,
@@ -442,7 +529,11 @@ fn validate_object(
     errors: &mut Vec<ValidationError>,
     depth: u32,
 ) {
-    if !is_type(schema, "object") {
+    let has_implicit_object = schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("patternProperties").is_some()
+        || schema.get("additionalProperties").is_some();
+    if !is_type(schema, "object") && !has_implicit_object {
         errors.push(ValidationError {
             path: path.to_owned(),
             expected: expected_type(schema),
@@ -471,6 +562,26 @@ fn validate_object(
             }
         }
     }
+    if let Some(min_props) = schema.get("minProperties").and_then(Value::as_u64) {
+        if (obj.len() as u64) < min_props {
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: format!("object & MinProperties<{min_props}>"),
+                value: Value::Object(obj.clone()),
+                description: None,
+            });
+        }
+    }
+    if let Some(max_props) = schema.get("maxProperties").and_then(Value::as_u64) {
+        if obj.len() as u64 > max_props {
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: format!("object & MaxProperties<{max_props}>"),
+                value: Value::Object(obj.clone()),
+                description: None,
+            });
+        }
+    }
     if let Some(props) = properties {
         for (key, prop_schema) in props {
             if let Some(val) = obj.get(key) {
@@ -487,7 +598,29 @@ fn validate_object(
             }
         }
     }
-    if equals {
+    if let Some(pp) = schema.get("patternProperties").and_then(Value::as_object) {
+        for (key, val) in obj {
+            for (pattern, pat_schema) in pp {
+                if let Ok(re) = regex_lite::Regex::new(pattern) {
+                    if re.is_match(key) {
+                        validate_value(
+                            val,
+                            pat_schema,
+                            defs,
+                            &format!("{path}.{key}"),
+                            true,
+                            equals,
+                            errors,
+                            depth,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let additional_properties_false =
+        schema.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+    if equals || additional_properties_false {
         if let Some(props) = properties {
             for key in obj.keys() {
                 if !props.contains_key(key) {
@@ -699,5 +832,104 @@ mod tests {
         assert!(validate(&json!(42), &schema).is_success());
         assert!(validate(&json!(null), &schema).is_success());
         assert!(validate(&json!({"a": 1}), &schema).is_success());
+    }
+
+    #[test]
+    fn all_of_validates_all_sub_schemas() {
+        let schema = json!({
+            "allOf": [
+                {"type":"object","properties":{"a":{"type":"string"}},"required":["a"]},
+                {"type":"object","properties":{"b":{"type":"integer"}},"required":["b"]}
+            ]
+        });
+        assert!(validate(&json!({"a":"hi","b":1}), &schema).is_success());
+        assert!(!validate(&json!({"a":"hi"}), &schema).is_success());
+        assert!(!validate(&json!({"b":1}), &schema).is_success());
+    }
+
+    #[test]
+    fn not_rejects_matching_value() {
+        let schema = json!({"not":{"type":"string"}});
+        assert!(!validate(&json!("hello"), &schema).is_success());
+        assert!(validate(&json!(42), &schema).is_success());
+        assert!(validate(&json!(null), &schema).is_success());
+    }
+
+    #[test]
+    fn pattern_properties_validates_matching_keys() {
+        let schema = json!({
+            "type":"object",
+            "patternProperties":{"^x-":{"type":"string"}}
+        });
+        assert!(validate(&json!({"x-custom":"ok"}), &schema).is_success());
+        assert!(!validate(&json!({"x-custom":123}), &schema).is_success());
+        assert!(validate(&json!({"normal":123}), &schema).is_success());
+    }
+
+    #[test]
+    fn min_max_properties() {
+        let schema = json!({"type":"object","minProperties":2});
+        assert!(!validate(&json!({"a":1}), &schema).is_success());
+        assert!(validate(&json!({"a":1,"b":2}), &schema).is_success());
+        let schema2 = json!({"type":"object","maxProperties":1});
+        assert!(validate(&json!({"a":1}), &schema2).is_success());
+        assert!(!validate(&json!({"a":1,"b":2}), &schema2).is_success());
+    }
+
+    #[test]
+    fn multiple_of_zero_is_silently_skipped() {
+        let schema = json!({"type":"number","multipleOf":0});
+        assert!(validate(&json!(42), &schema).is_success());
+        assert!(validate(&json!(3.15), &schema).is_success());
+    }
+
+    #[test]
+    fn duplicate_json_keys_last_wins() {
+        let raw = r#"{"a":1,"a":2}"#;
+        let value: Value = serde_json::from_str(raw).expect("valid json");
+        assert_eq!(value["a"], json!(2));
+        let schema = json!({"type":"object","properties":{"a":{"type":"number"}}});
+        assert!(validate(&value, &schema).is_success());
+    }
+
+    #[test]
+    fn if_then_else_conditional() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"status":{"type":"string"}},
+            "if":{"properties":{"status":{"const":"shipped"}}},
+            "then":{"required":["tracking_number"]}
+        });
+        assert!(!validate(&json!({"status":"shipped"}), &schema).is_success());
+        assert!(validate(
+            &json!({"status":"shipped","tracking_number":"123"}),
+            &schema
+        )
+        .is_success());
+        assert!(validate(&json!({"status":"pending"}), &schema).is_success());
+    }
+
+    #[test]
+    fn external_ref_produces_error() {
+        let schema = json!({"$ref":"https://example.com/schema.json"});
+        let result = validate(&json!("anything"), &schema);
+        assert!(!result.is_success());
+        if let Validation::Failure(f) = result {
+            assert!(f.errors[0]
+                .description
+                .as_ref()
+                .is_some_and(|d| d.contains("External $ref not supported")));
+        }
+    }
+
+    #[test]
+    fn additional_properties_false_rejects_extra() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"a":{"type":"string"}},
+            "additionalProperties":false
+        });
+        assert!(validate(&json!({"a":"hi"}), &schema).is_success());
+        assert!(!validate(&json!({"a":"hi","b":1}), &schema).is_success());
     }
 }
