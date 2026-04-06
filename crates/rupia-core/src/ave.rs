@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -741,6 +741,284 @@ pub fn schema_resolve(raw_llm_output: &str, config: &AveConfig) -> Result<Schema
     Ok(pkg)
 }
 
+#[derive(Debug, Clone)]
+pub struct SchemaVersion {
+    pub version: u32,
+    pub timestamp: String,
+    pub source: SchemaSource,
+    pub schema: Value,
+    pub changes: Vec<VersionChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaSource {
+    Generated,
+    AutoEvolution,
+    Manual,
+}
+
+#[derive(Debug, Clone)]
+pub struct VersionChange {
+    pub field: String,
+    pub change_type: String,
+    pub description: String,
+}
+
+#[derive(Debug)]
+pub struct SchemaVersionStore {
+    versions: Vec<SchemaVersion>,
+    current: u32,
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "schema version counts won't exceed u32::MAX"
+)]
+impl SchemaVersionStore {
+    pub fn new(initial_schema: Value) -> Self {
+        let v = SchemaVersion {
+            version: 1,
+            timestamp: current_timestamp(),
+            source: SchemaSource::Generated,
+            schema: initial_schema,
+            changes: vec![],
+        };
+        Self {
+            versions: vec![v],
+            current: 1,
+        }
+    }
+
+    pub fn current_schema(&self) -> &Value {
+        &self.versions[self.current as usize - 1].schema
+    }
+
+    pub fn current_version(&self) -> u32 {
+        self.current
+    }
+
+    pub fn push(
+        &mut self,
+        schema: Value,
+        source: SchemaSource,
+        changes: Vec<VersionChange>,
+    ) -> u32 {
+        let next = self.versions.len() as u32 + 1;
+        self.versions.push(SchemaVersion {
+            version: next,
+            timestamp: current_timestamp(),
+            source,
+            schema,
+            changes,
+        });
+        self.current = next;
+        next
+    }
+
+    pub fn rollback(&mut self, target_version: u32) -> Result<(), String> {
+        if target_version == 0 || target_version > self.versions.len() as u32 {
+            return Err(format!(
+                "version {target_version} out of range (1..={})",
+                self.versions.len()
+            ));
+        }
+        self.current = target_version;
+        Ok(())
+    }
+
+    pub fn diff(&self, from: u32, to: u32) -> Result<crate::schema_ops::SchemaDiff, String> {
+        let max = self.versions.len() as u32;
+        if from == 0 || from > max {
+            return Err(format!("from version {from} out of range (1..={max})"));
+        }
+        if to == 0 || to > max {
+            return Err(format!("to version {to} out of range (1..={max})"));
+        }
+        let old = &self.versions[from as usize - 1].schema;
+        let new = &self.versions[to as usize - 1].schema;
+        Ok(crate::schema_ops::diff_schemas(old, new))
+    }
+
+    pub fn changelog(&self) -> &[SchemaVersion] {
+        &self.versions
+    }
+
+    pub fn save_to_dir(&self, dir: &Path) -> Result<(), String> {
+        let schemas_dir = dir.join("schemas");
+        std::fs::create_dir_all(&schemas_dir).map_err(|e| e.to_string())?;
+        for v in &self.versions {
+            let filename = format!("v{}_{}.json", v.version, v.timestamp);
+            let path = schemas_dir.join(filename);
+            let content = serde_json::to_string_pretty(&v.schema).map_err(|e| e.to_string())?;
+            std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        }
+        let current_schema = self.current_schema();
+        let current_path = schemas_dir.join("current.json");
+        let current_content =
+            serde_json::to_string_pretty(current_schema).map_err(|e| e.to_string())?;
+        std::fs::write(&current_path, current_content).map_err(|e| e.to_string())?;
+        let changelog: Vec<serde_json::Value> = self
+            .versions
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "version": v.version,
+                    "timestamp": v.timestamp,
+                    "source": format!("{:?}", v.source),
+                    "changes": v.changes.iter().map(|c| serde_json::json!({
+                        "field": c.field,
+                        "change_type": c.change_type,
+                        "description": c.description,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let changelog_json = serde_json::json!({"current": self.current, "versions": changelog});
+        let changelog_content =
+            serde_json::to_string_pretty(&changelog_json).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("schema-changelog.json"), changelog_content)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn load_from_dir(dir: &Path) -> Result<Self, String> {
+        let changelog_path = dir.join("schema-changelog.json");
+        let raw = std::fs::read_to_string(&changelog_path).map_err(|e| e.to_string())?;
+        let changelog: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let current = changelog
+            .get("current")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "missing 'current' in changelog".to_string())?
+            as u32;
+        let entries = changelog
+            .get("versions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "missing 'versions' in changelog".to_string())?;
+        let schemas_dir = dir.join("schemas");
+        let mut versions = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let version = entry
+                .get("version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "missing version number".to_string())?
+                as u32;
+            let timestamp = entry
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "missing timestamp".to_string())?
+                .to_owned();
+            let source_str = entry
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("Generated");
+            let source = match source_str {
+                "AutoEvolution" => SchemaSource::AutoEvolution,
+                "Manual" => SchemaSource::Manual,
+                _ => SchemaSource::Generated,
+            };
+            let changes: Vec<VersionChange> = entry
+                .get("changes")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            Some(VersionChange {
+                                field: c.get("field")?.as_str()?.to_owned(),
+                                change_type: c.get("change_type")?.as_str()?.to_owned(),
+                                description: c.get("description")?.as_str()?.to_owned(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let filename = format!("v{version}_{timestamp}.json");
+            let schema_path = schemas_dir.join(filename);
+            let schema_raw = std::fs::read_to_string(&schema_path).map_err(|e| e.to_string())?;
+            let schema: Value = serde_json::from_str(&schema_raw).map_err(|e| e.to_string())?;
+            versions.push(SchemaVersion {
+                version,
+                timestamp,
+                source,
+                schema,
+                changes,
+            });
+        }
+        if versions.is_empty() {
+            return Err("no versions found".to_string());
+        }
+        Ok(Self { versions, current })
+    }
+}
+
+pub fn apply_auto_evolutions(
+    store: &mut SchemaVersionStore,
+    proposals: &[EvolutionProposal],
+) -> Vec<u32> {
+    let auto_proposals: Vec<&EvolutionProposal> = proposals
+        .iter()
+        .filter(|p| p.approval == ApprovalLevel::Auto)
+        .collect();
+    if auto_proposals.is_empty() {
+        return vec![];
+    }
+    let mut schema = store.current_schema().clone();
+    let mut changes = Vec::new();
+    for p in &auto_proposals {
+        match p.change_type {
+            ChangeType::DescriptionEnrich => {
+                if let Some(prop) = schema
+                    .get_mut("properties")
+                    .and_then(|ps| ps.get_mut(&p.field))
+                {
+                    if prop.get("description").is_none() {
+                        prop.as_object_mut().map(|obj| {
+                            obj.insert(
+                                "description".into(),
+                                Value::String(format!("The {} field", p.field)),
+                            )
+                        });
+                    }
+                }
+            }
+            ChangeType::DefaultAdd => {
+                if let Some(prop) = schema
+                    .get_mut("properties")
+                    .and_then(|ps| ps.get_mut(&p.field))
+                {
+                    if prop.get("default").is_none() {
+                        let default_val = match prop.get("type").and_then(Value::as_str) {
+                            Some("string") => Value::String(String::new()),
+                            Some("integer" | "number") => serde_json::json!(0),
+                            Some("boolean") => serde_json::json!(false),
+                            _ => Value::Null,
+                        };
+                        prop.as_object_mut()
+                            .map(|obj| obj.insert("default".into(), default_val));
+                    }
+                }
+            }
+            _ => continue,
+        }
+        changes.push(VersionChange {
+            field: p.field.clone(),
+            change_type: format!("{:?}", p.change_type),
+            description: p.description.clone(),
+        });
+    }
+    if changes.is_empty() {
+        return vec![];
+    }
+    let ver = store.push(schema, SchemaSource::AutoEvolution, changes);
+    vec![ver]
+}
+
+fn current_timestamp() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}", dur.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,5 +1655,119 @@ mod tests {
         assert!(proposals.iter().any(
             |p| p.change_type == ChangeType::RangeExpand && p.approval == ApprovalLevel::Async
         ));
+    }
+
+    #[test]
+    fn version_store_push_and_current() {
+        let s1 = json!({"type": "object", "properties": {"a": {"type": "string"}}});
+        let mut store = SchemaVersionStore::new(s1.clone());
+        assert_eq!(store.current_version(), 1);
+        assert_eq!(store.current_schema(), &s1);
+        let s2 = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}});
+        let v2 = store.push(
+            s2.clone(),
+            SchemaSource::Manual,
+            vec![VersionChange {
+                field: "b".into(),
+                change_type: "added".into(),
+                description: "added field b".into(),
+            }],
+        );
+        assert_eq!(v2, 2);
+        let s3 = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}, "c": {"type": "boolean"}}});
+        let v3 = store.push(s3.clone(), SchemaSource::AutoEvolution, vec![]);
+        assert_eq!(v3, 3);
+        assert_eq!(store.current_version(), 3);
+        assert_eq!(store.current_schema(), &s3);
+    }
+
+    #[test]
+    fn version_store_rollback() {
+        let s1 = json!({"type": "object", "properties": {"a": {"type": "string"}}});
+        let mut store = SchemaVersionStore::new(s1.clone());
+        let s2 = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}});
+        store.push(s2, SchemaSource::Manual, vec![]);
+        let s3 = json!({"type": "object", "properties": {"c": {"type": "boolean"}}});
+        store.push(s3, SchemaSource::Manual, vec![]);
+        assert_eq!(store.current_version(), 3);
+        store.rollback(1).expect("rollback to v1");
+        assert_eq!(store.current_version(), 1);
+        assert_eq!(store.current_schema(), &s1);
+        assert!(store.rollback(0).is_err());
+        assert!(store.rollback(99).is_err());
+    }
+
+    #[test]
+    fn version_store_diff() {
+        let s1 = json!({"type": "object", "properties": {"a": {"type": "string"}}});
+        let mut store = SchemaVersionStore::new(s1);
+        let s2 = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}});
+        store.push(s2, SchemaSource::Manual, vec![]);
+        let s3 = json!({"type": "object", "properties": {"b": {"type": "integer"}, "c": {"type": "boolean"}}});
+        store.push(s3, SchemaSource::Manual, vec![]);
+        let diff = store.diff(1, 3).expect("diff v1 to v3");
+        assert!(diff.added.contains(&"c".to_owned()));
+        assert!(diff.removed.contains(&"a".to_owned()));
+        assert!(store.diff(0, 1).is_err());
+        assert!(store.diff(1, 99).is_err());
+    }
+
+    #[test]
+    fn version_store_save_load_roundtrip() {
+        let s1 = json!({"type": "object", "properties": {"a": {"type": "string"}}});
+        let mut store = SchemaVersionStore::new(s1.clone());
+        let s2 = json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "integer"}}});
+        store.push(
+            s2.clone(),
+            SchemaSource::AutoEvolution,
+            vec![VersionChange {
+                field: "b".into(),
+                change_type: "added".into(),
+                description: "added field b".into(),
+            }],
+        );
+        let dir = std::env::temp_dir().join(format!("rupia_test_{}", std::process::id()));
+        store.save_to_dir(&dir).expect("save");
+        let loaded = SchemaVersionStore::load_from_dir(&dir).expect("load");
+        assert_eq!(loaded.current_version(), store.current_version());
+        assert_eq!(loaded.current_schema(), store.current_schema());
+        assert_eq!(loaded.changelog().len(), 2);
+        assert_eq!(loaded.changelog()[0].schema, s1);
+        assert_eq!(loaded.changelog()[1].schema, s2);
+        assert_eq!(loaded.changelog()[1].source, SchemaSource::AutoEvolution);
+        assert_eq!(loaded.changelog()[1].changes.len(), 1);
+        assert_eq!(loaded.changelog()[1].changes[0].field, "b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_auto_evolutions_pushes_version() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"]
+        });
+        let mut store = SchemaVersionStore::new(schema);
+        let proposals = vec![
+            EvolutionProposal {
+                field: "name".into(),
+                change_type: ChangeType::DescriptionEnrich,
+                approval: ApprovalLevel::Auto,
+                description: "add description".into(),
+            },
+            EvolutionProposal {
+                field: "name".into(),
+                change_type: ChangeType::TypeChange,
+                approval: ApprovalLevel::Sync,
+                description: "type change".into(),
+            },
+        ];
+        let new_vers = apply_auto_evolutions(&mut store, &proposals);
+        assert_eq!(new_vers.len(), 1);
+        assert_eq!(store.current_version(), 2);
+        let desc = store.current_schema()["properties"]["name"]["description"]
+            .as_str()
+            .expect("description should exist");
+        assert!(desc.contains("name"));
     }
 }
