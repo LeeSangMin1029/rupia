@@ -1,28 +1,27 @@
 use serde_json::Value;
 
+use crate::schema_util;
+
 #[expect(clippy::cast_possible_truncation, reason = "schema values always fit")]
 fn usize_from_schema(schema: &Value, key: &str, default: usize) -> usize {
-    schema.get(key).and_then(Value::as_u64).unwrap_or(default as u64) as usize
+    schema
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or(default as u64) as usize
 }
 
 pub fn generate(schema: &Value) -> Value {
-    let defs = schema.get("$defs").or_else(|| schema.get("definitions"));
-    generate_value(schema, defs, 0)
+    generate_value(schema, schema, 0)
 }
 
 const MAX_DEPTH: usize = 32;
 
-fn generate_value(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
+fn generate_value(schema: &Value, root: &Value, depth: usize) -> Value {
     if depth > MAX_DEPTH {
         return Value::Null;
     }
-    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
-        let key = r
-            .strip_prefix("#/$defs/")
-            .or_else(|| r.strip_prefix("#/definitions/"));
-        if let Some(resolved) = key.and_then(|k| defs?.get(k)) {
-            return generate_value(resolved, defs, depth + 1);
-        }
+    let schema = schema_util::resolve_schema(schema, root);
+    if schema.get("$ref").is_some() {
         return Value::Null;
     }
     if let Some(enum_vals) = schema.get("enum").and_then(Value::as_array) {
@@ -36,7 +35,7 @@ fn generate_value(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
     if let Some(variants) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
         if let Some(arr) = variants.as_array() {
             if !arr.is_empty() {
-                return generate_value(&arr[rand_usize() % arr.len()], defs, depth + 1);
+                return generate_value(&arr[rand_usize() % arr.len()], root, depth + 1);
             }
         }
     }
@@ -45,8 +44,8 @@ fn generate_value(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
         Some("integer") => gen_integer(schema),
         Some("number") => gen_number(schema),
         Some("string") => gen_string(schema),
-        Some("array") => gen_array(schema, defs, depth),
-        Some("object") => gen_object(schema, defs, depth),
+        Some("array") => gen_array(schema, root, depth),
+        Some("object") => gen_object(schema, root, depth),
         // "null" and unknown types
         _ => Value::Null,
     }
@@ -61,10 +60,16 @@ fn gen_integer(schema: &Value) -> Value {
     Value::Number(val.into())
 }
 
-#[expect(clippy::cast_precision_loss, reason = "acceptable for random generation")]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "acceptable for random generation"
+)]
 fn gen_number(schema: &Value) -> Value {
     let min = schema.get("minimum").and_then(Value::as_f64).unwrap_or(0.0);
-    let max = schema.get("maximum").and_then(Value::as_f64).unwrap_or(100.0);
+    let max = schema
+        .get("maximum")
+        .and_then(Value::as_f64)
+        .unwrap_or(100.0);
     let frac = (rand_usize() as f64) / f64::from(u32::MAX);
     let val = min + frac * (max - min);
     let rounded = (val * 100.0).round() / 100.0;
@@ -165,13 +170,21 @@ fn base64_encode(input: &str) -> String {
         let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
         out.push(TABLE[(b0 >> 2) as usize] as char);
         out.push(TABLE[((b0 & 3) << 4 | b1 >> 4) as usize] as char);
-        out.push(if chunk.len() > 1 { TABLE[((b1 & 0xF) << 2 | b2 >> 6) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[(b2 & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[((b1 & 0xF) << 2 | b2 >> 6) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(b2 & 0x3F) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
 
-fn gen_array(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
+fn gen_array(schema: &Value, root: &Value, depth: usize) -> Value {
     let min = usize_from_schema(schema, "minItems", 1);
     let max = usize_from_schema(schema, "maxItems", 3);
     let count = min + rand_usize() % (max - min + 1).max(1);
@@ -181,16 +194,16 @@ fn gen_array(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
         .unwrap_or(Value::Object(serde_json::Map::default()));
     Value::Array(
         (0..count)
-            .map(|_| generate_value(&items_schema, defs, depth + 1))
+            .map(|_| generate_value(&items_schema, root, depth + 1))
             .collect(),
     )
 }
 
-fn gen_object(schema: &Value, defs: Option<&Value>, depth: usize) -> Value {
+fn gen_object(schema: &Value, root: &Value, depth: usize) -> Value {
     let mut map = serde_json::Map::new();
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (key, prop_schema) in properties {
-            map.insert(key.clone(), generate_value(prop_schema, defs, depth + 1));
+            map.insert(key.clone(), generate_value(prop_schema, root, depth + 1));
         }
     }
     Value::Object(map)
@@ -200,7 +213,9 @@ fn rand_usize() -> usize {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     #[expect(clippy::cast_possible_truncation, reason = "hash to usize")]
-    { RandomState::new().build_hasher().finish() as usize }
+    {
+        RandomState::new().build_hasher().finish() as usize
+    }
 }
 
 #[cfg(test)]

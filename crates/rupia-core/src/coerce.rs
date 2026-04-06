@@ -1,30 +1,23 @@
 use serde_json::Value;
 
 use crate::lenient;
+use crate::schema_util;
 use crate::types::ParseResult;
 
-const MAX_REF_DEPTH: u32 = 64;
-
 pub fn coerce_with_schema(value: Value, schema: &Value) -> Value {
-    let defs = schema.get("$defs").or_else(|| schema.get("definitions"));
-    coerce_value(value, schema, defs, 0)
+    coerce_value(value, schema, schema, 0)
 }
 
-fn coerce_value(value: Value, schema: &Value, defs: Option<&Value>, depth: u32) -> Value {
-    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
-        if depth > MAX_REF_DEPTH {
-            return value;
-        }
-        if let Some(resolved) = resolve_ref(r, defs) {
-            return coerce_value(value, resolved, defs, depth + 1);
-        }
+fn coerce_value(value: Value, schema: &Value, root: &Value, depth: u32) -> Value {
+    let schema = schema_util::resolve_schema(schema, root);
+    if schema.get("$ref").is_some() {
         return value;
     }
     if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array) {
-        return coerce_any_of(value, any_of, defs, depth);
+        return coerce_any_of(value, any_of, root, depth);
     }
     if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array) {
-        return coerce_any_of(value, one_of, defs, depth);
+        return coerce_any_of(value, one_of, root, depth);
     }
     if schema.get("const").is_some() {
         return value;
@@ -33,23 +26,23 @@ fn coerce_value(value: Value, schema: &Value, defs: Option<&Value>, depth: u32) 
         return coerce_to_string(value, schema);
     }
     if is_array_schema(schema) {
-        return coerce_to_array(value, schema, defs, depth);
+        return coerce_to_array(value, schema, root, depth);
     }
     if let Value::String(s) = &value {
-        if let Some(coerced) = try_coerce_string(s, schema, defs, depth) {
+        if let Some(coerced) = try_coerce_string(s, schema, root, depth) {
             return coerced;
         }
         return value;
     }
     if let Value::Array(arr) = value {
         if is_array_schema(schema) {
-            return coerce_array_items(arr, schema, defs, depth);
+            return coerce_array_items(arr, schema, root, depth);
         }
         return Value::Array(arr);
     }
     if let Value::Object(obj) = value {
         if is_object_schema(schema) {
-            return coerce_object(obj, schema, defs, depth);
+            return coerce_object(obj, schema, root, depth);
         }
         return Value::Object(obj);
     }
@@ -61,7 +54,7 @@ fn coerce_value(value: Value, schema: &Value, defs: Option<&Value>, depth: u32) 
     value
 }
 
-fn try_coerce_string(s: &str, schema: &Value, defs: Option<&Value>, depth: u32) -> Option<Value> {
+fn try_coerce_string(s: &str, schema: &Value, root: &Value, depth: u32) -> Option<Value> {
     if let Some(enum_vals) = schema.get("enum").and_then(Value::as_array) {
         return coerce_enum_value(&Value::String(s.to_owned()), enum_vals);
     }
@@ -71,7 +64,7 @@ fn try_coerce_string(s: &str, schema: &Value, defs: Option<&Value>, depth: u32) 
         }
     }
     if let ParseResult::Success(parsed) = lenient::parse(s) {
-        return Some(coerce_value(parsed, schema, defs, depth));
+        return Some(coerce_value(parsed, schema, root, depth));
     }
     if s.len() == 1 && s.eq_ignore_ascii_case("n") {
         if is_null_schema(schema) {
@@ -170,12 +163,12 @@ fn coerce_enum_value(value: &Value, enum_vals: &[Value]) -> Option<Value> {
     None
 }
 
-fn coerce_to_array(value: Value, schema: &Value, defs: Option<&Value>, depth: u32) -> Value {
+fn coerce_to_array(value: Value, schema: &Value, root: &Value, depth: u32) -> Value {
     match value {
-        Value::Array(arr) => coerce_array_items(arr, schema, defs, depth),
+        Value::Array(arr) => coerce_array_items(arr, schema, root, depth),
         Value::Object(ref obj) => {
             if let Some(arr) = try_indexed_object_to_array(obj) {
-                return coerce_array_items(arr, schema, defs, depth);
+                return coerce_array_items(arr, schema, root, depth);
             }
             Value::Array(vec![coerce_value(
                 value,
@@ -183,7 +176,7 @@ fn coerce_to_array(value: Value, schema: &Value, defs: Option<&Value>, depth: u3
                     .get("items")
                     .cloned()
                     .unwrap_or(Value::Object(serde_json::Map::default())),
-                defs,
+                root,
                 depth,
             )])
         }
@@ -192,7 +185,7 @@ fn coerce_to_array(value: Value, schema: &Value, defs: Option<&Value>, depth: u3
                 .get("items")
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::default()));
-            Value::Array(vec![coerce_value(value, &items_schema, defs, depth)])
+            Value::Array(vec![coerce_value(value, &items_schema, root, depth)])
         }
     }
 }
@@ -218,14 +211,14 @@ fn try_indexed_object_to_array(obj: &serde_json::Map<String, Value>) -> Option<V
     Some(indices.into_iter().map(|(_, v)| v.clone()).collect())
 }
 
-fn coerce_array_items(arr: Vec<Value>, schema: &Value, defs: Option<&Value>, depth: u32) -> Value {
+fn coerce_array_items(arr: Vec<Value>, schema: &Value, root: &Value, depth: u32) -> Value {
     let items_schema = schema
         .get("items")
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::default()));
     Value::Array(
         arr.into_iter()
-            .map(|item| coerce_value(item, &items_schema, defs, depth))
+            .map(|item| coerce_value(item, &items_schema, root, depth))
             .collect(),
     )
 }
@@ -233,7 +226,7 @@ fn coerce_array_items(arr: Vec<Value>, schema: &Value, defs: Option<&Value>, dep
 fn coerce_object(
     obj: serde_json::Map<String, Value>,
     schema: &Value,
-    defs: Option<&Value>,
+    root: &Value,
     depth: u32,
 ) -> Value {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
@@ -250,7 +243,7 @@ fn coerce_object(
             }
             result.insert(
                 key.clone(),
-                coerce_value(val.clone(), prop_schema, defs, depth),
+                coerce_value(val.clone(), prop_schema, root, depth),
             );
         } else if let Some(default) = prop_schema.get("default") {
             result.insert(key.clone(), default.clone());
@@ -263,7 +256,7 @@ fn coerce_object(
     for (key, val) in &obj {
         if !properties.contains_key(key) {
             let coerced = match additional {
-                Some(s) => coerce_value(val.clone(), s, defs, depth),
+                Some(s) => coerce_value(val.clone(), s, root, depth),
                 None => val.clone(),
             };
             result.insert(key.clone(), coerced);
@@ -272,27 +265,27 @@ fn coerce_object(
     Value::Object(result)
 }
 
-fn coerce_any_of(value: Value, variants: &[Value], defs: Option<&Value>, depth: u32) -> Value {
+fn coerce_any_of(value: Value, variants: &[Value], root: &Value, depth: u32) -> Value {
     if let Value::String(ref s) = value {
         let has_string = variants
             .iter()
-            .any(|v| is_string_schema(resolve(v, defs, depth)));
+            .any(|v| is_string_schema(schema_util::resolve_schema(v, root)));
         if has_string {
             return value;
         }
         if let ParseResult::Success(parsed) = lenient::parse(s) {
-            if let Some(matched) = find_matching_schema(&parsed, variants, defs, depth) {
-                return coerce_value(parsed, matched, defs, depth);
+            if let Some(matched) = find_matching_schema(&parsed, variants, root, depth) {
+                return coerce_value(parsed, matched, root, depth);
             }
             return parsed;
         }
         if s.len() == 1 && s.eq_ignore_ascii_case("n") {
             let has_bool = variants
                 .iter()
-                .any(|v| is_boolean_schema(resolve(v, defs, depth)));
+                .any(|v| is_boolean_schema(schema_util::resolve_schema(v, root)));
             let has_null = variants
                 .iter()
-                .any(|v| is_null_schema(resolve(v, defs, depth)));
+                .any(|v| is_null_schema(schema_util::resolve_schema(v, root)));
             if has_bool && !has_null {
                 return Value::Bool(false);
             }
@@ -303,52 +296,33 @@ fn coerce_any_of(value: Value, variants: &[Value], defs: Option<&Value>, depth: 
         return value;
     }
     if let Value::Object(ref _obj) = value {
-        if let Some(matched) = find_matching_schema(&value, variants, defs, depth) {
-            return coerce_value(value, matched, defs, depth);
+        if let Some(matched) = find_matching_schema(&value, variants, root, depth) {
+            return coerce_value(value, matched, root, depth);
         }
         return value;
     }
     if let Value::Array(_) = value {
         let array_schemas: Vec<&Value> = variants
             .iter()
-            .filter(|v| is_array_schema(resolve(v, defs, depth)))
+            .filter(|v| is_array_schema(schema_util::resolve_schema(v, root)))
             .collect();
         if array_schemas.len() == 1 {
-            return coerce_value(value, array_schemas[0], defs, depth);
+            return coerce_value(value, array_schemas[0], root, depth);
         }
         return value;
     }
     value
 }
 
-fn resolve_ref<'a>(ref_path: &str, defs: Option<&'a Value>) -> Option<&'a Value> {
-    let key = ref_path
-        .strip_prefix("#/$defs/")
-        .or_else(|| ref_path.strip_prefix("#/definitions/"))?;
-    defs?.get(key)
-}
-
-fn resolve<'a>(schema: &'a Value, defs: Option<&'a Value>, depth: u32) -> &'a Value {
-    if depth > MAX_REF_DEPTH {
-        return schema;
-    }
-    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
-        if let Some(resolved) = resolve_ref(r, defs) {
-            return resolve(resolved, defs, depth + 1);
-        }
-    }
-    schema
-}
-
 fn find_matching_schema<'a>(
     value: &Value,
     variants: &'a [Value],
-    defs: Option<&Value>,
-    depth: u32,
+    root: &Value,
+    _depth: u32,
 ) -> Option<&'a Value> {
     let matching: Vec<&Value> = variants
         .iter()
-        .filter(|s| matches_type(value, resolve(s, defs, depth)))
+        .filter(|s| matches_type(value, schema_util::resolve_schema(s, root)))
         .collect();
     if matching.len() == 1 {
         return Some(matching[0]);

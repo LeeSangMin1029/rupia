@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::schema_util;
+
 pub fn inject_constraints_to_description(schema: &Value) -> Value {
     let mut result = schema.clone();
     inject_recursive(&mut result);
@@ -528,8 +530,10 @@ pub fn cross_reference_schemas(schemas: &[Value]) -> CrossRefResult {
             divergences: vec![],
         };
     }
-    let all_flat: Vec<HashMap<String, Value>> =
-        schemas.iter().map(|s| flatten_properties(s, "")).collect();
+    let all_flat: Vec<HashMap<String, Value>> = schemas
+        .iter()
+        .map(|s| schema_util::flatten_properties(s, s).into_iter().collect())
+        .collect();
     let mut field_sources: HashMap<String, Vec<&Value>> = HashMap::new();
     for flat in &all_flat {
         for (key, val) in flat {
@@ -576,25 +580,6 @@ pub fn cross_reference_schemas(schemas: &[Value]) -> CrossRefResult {
         universal_constraints,
         divergences,
     }
-}
-
-fn flatten_properties(schema: &Value, prefix: &str) -> HashMap<String, Value> {
-    let mut result = HashMap::new();
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return result;
-    };
-    for (key, val) in props {
-        let full_key = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        result.insert(full_key.clone(), val.clone());
-        if val.get("properties").is_some() {
-            result.extend(flatten_properties(val, &full_key));
-        }
-    }
-    result
 }
 
 fn collect_enum_info(
