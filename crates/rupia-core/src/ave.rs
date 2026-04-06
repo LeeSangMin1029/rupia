@@ -736,6 +736,16 @@ pub fn schema_resolve(raw_llm_output: &str, config: &AveConfig) -> Result<Schema
     if !lint_errors.is_empty() {
         return Err(format!("schema lint failed: {}", lint_errors.join("; ")));
     }
+    let strictness = check_strictness(&pkg.schema);
+    if !strictness.passed {
+        let msgs: Vec<String> = strictness
+            .violations
+            .iter()
+            .filter(|v| v.severity == ViolationSeverity::Block)
+            .map(|v| format!("[{}] {}: {}", v.code, v.path, v.fix))
+            .collect();
+        return Err(format!("schema strictness failed: {}", msgs.join("; ")));
+    }
     let summary = summarize_schema(&pkg.schema, config.model_tier)?;
     pkg.summary = summary;
     Ok(pkg)
@@ -1010,6 +1020,328 @@ pub fn apply_auto_evolutions(
     }
     let ver = store.push(schema, SchemaSource::AutoEvolution, changes);
     vec![ver]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViolationSeverity {
+    Block,
+    Warn,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrictnessViolation {
+    pub code: &'static str,
+    pub severity: ViolationSeverity,
+    pub path: String,
+    pub message: String,
+    pub fix: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrictnessReport {
+    pub passed: bool,
+    pub violations: Vec<StrictnessViolation>,
+}
+
+pub fn check_strictness(schema: &Value) -> StrictnessReport {
+    let mut violations = Vec::new();
+    check_s007(schema, &mut violations);
+    check_strictness_recursive(schema, "$", &mut violations);
+    let passed = violations
+        .iter()
+        .all(|v| v.severity != ViolationSeverity::Block);
+    StrictnessReport { passed, violations }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "8 anti-pattern checks, splitting reduces readability"
+)]
+fn check_strictness_recursive(
+    schema: &Value,
+    path: &str,
+    violations: &mut Vec<StrictnessViolation>,
+) {
+    let Some(obj) = schema.as_object() else {
+        return;
+    };
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        let prop_count = props.len();
+        if prop_count >= 3 {
+            let required = obj
+                .get("required")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if required == 0 {
+                violations.push(StrictnessViolation {
+                    code: "AVE-S001",
+                    severity: ViolationSeverity::Block,
+                    path: path.to_owned(),
+                    message: format!("Object with {prop_count} properties but 0 required fields"),
+                    fix: "Add required array. Without it, empty {{}} passes validation.".into(),
+                });
+            }
+        }
+        if prop_count >= 3 {
+            let string_props: Vec<&String> = props
+                .iter()
+                .filter(|(_, v)| v.get("type").and_then(Value::as_str) == Some("string"))
+                .map(|(k, _)| k)
+                .collect();
+            let unconstrained_strings: Vec<&&String> = string_props
+                .iter()
+                .filter(|k| {
+                    let p = &props[**k];
+                    p.get("format").is_none()
+                        && p.get("enum").is_none()
+                        && p.get("pattern").is_none()
+                })
+                .collect();
+            if unconstrained_strings.len() >= 3 && unconstrained_strings.len() == string_props.len()
+            {
+                violations.push(StrictnessViolation {
+                    code: "AVE-S002",
+                    severity: ViolationSeverity::Block,
+                    path: path.to_owned(),
+                    message: format!(
+                        "All {} string properties lack format/enum/pattern",
+                        string_props.len()
+                    ),
+                    fix: "Add format, enum, or pattern to string fields. 'asdf' passes as email."
+                        .into(),
+                });
+            }
+            let all_string = props
+                .values()
+                .all(|v| v.get("type").and_then(Value::as_str) == Some("string"));
+            if all_string {
+                violations.push(StrictnessViolation {
+                    code: "AVE-S005",
+                    severity: ViolationSeverity::Block,
+                    path: path.to_owned(),
+                    message: format!("Every property ({prop_count}) is type \"string\""),
+                    fix: "Not all fields are strings. Use integer, number, boolean, array, object."
+                        .into(),
+                });
+            }
+        }
+        for (name, prop) in props {
+            let child_path = format!("{path}.{name}");
+            let typ = prop.get("type").and_then(Value::as_str);
+            if (typ == Some("number") || typ == Some("integer"))
+                && prop.get("minimum").is_none()
+                && prop.get("maximum").is_none()
+            {
+                violations.push(StrictnessViolation {
+                    code: "AVE-S003",
+                    severity: ViolationSeverity::Warn,
+                    path: child_path.clone(),
+                    message: format!("Number field '{name}' without min or max"),
+                    fix: "Add minimum/maximum. -999999 or 999999 would pass.".into(),
+                });
+            }
+            if typ == Some("array") && prop.get("items").is_none() {
+                violations.push(StrictnessViolation {
+                    code: "AVE-S004",
+                    severity: ViolationSeverity::Warn,
+                    path: child_path.clone(),
+                    message: format!("Array field '{name}' without items schema"),
+                    fix: "Add items schema. [null, 123, 'garbage'] would pass.".into(),
+                });
+            }
+            if let Some(enum_arr) = prop.get("enum").and_then(Value::as_array) {
+                if enum_arr.len() >= 50 {
+                    violations.push(StrictnessViolation {
+                        code: "AVE-S006",
+                        severity: ViolationSeverity::Warn,
+                        path: child_path.clone(),
+                        message: format!("Enum has {} values", enum_arr.len()),
+                        fix: format!(
+                            "Enum has {} values. Consider if this is effectively unconstrained.",
+                            enum_arr.len()
+                        ),
+                    });
+                }
+            }
+            if typ == Some("object") {
+                if prop.get("properties").is_none() {
+                    violations.push(StrictnessViolation {
+                        code: "AVE-S008",
+                        severity: ViolationSeverity::Warn,
+                        path: child_path.clone(),
+                        message: format!(
+                            "Nested object at {child_path} has no property definitions"
+                        ),
+                        fix: format!("Nested object at {child_path} has no property definitions."),
+                    });
+                }
+                check_strictness_recursive(prop, &child_path, violations);
+            }
+            if let Some(items) = prop.get("items") {
+                if items.get("type").and_then(Value::as_str) == Some("object") {
+                    let items_path = format!("{child_path}.items");
+                    check_strictness_recursive(items, &items_path, violations);
+                }
+            }
+        }
+    }
+}
+
+fn check_s007(schema: &Value, violations: &mut Vec<StrictnessViolation>) {
+    let has_type = schema.get("type").is_some();
+    let has_any_of = schema.get("anyOf").is_some();
+    let has_one_of = schema.get("oneOf").is_some();
+    let has_ref = schema.get("$ref").is_some();
+    if !has_type && !has_any_of && !has_one_of && !has_ref {
+        violations.push(StrictnessViolation {
+            code: "AVE-S007",
+            severity: ViolationSeverity::Block,
+            path: "$".into(),
+            message: "Schema has no root type".into(),
+            fix: "Schema has no root type. Any JSON value passes.".into(),
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LooseningChange {
+    pub code: &'static str,
+    pub severity: ViolationSeverity,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LooseningReport {
+    pub allowed: bool,
+    pub changes: Vec<LooseningChange>,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "7 loosening checks, splitting reduces readability"
+)]
+pub fn check_loosening(old: &Value, new: &Value) -> LooseningReport {
+    let mut changes = Vec::new();
+    let diff = crate::schema_ops::diff_schemas(old, new);
+    let old_required = old
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let new_required = new
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for r in &old_required {
+        if !new_required.contains(r) {
+            let name = r.as_str().unwrap_or("?");
+            changes.push(LooseningChange {
+                code: "AVE-L001",
+                severity: ViolationSeverity::Block,
+                description: format!("Required field '{name}' removed"),
+            });
+        }
+    }
+    for ch in &diff.changed {
+        if ch.field == "format" && !ch.old.is_empty() && ch.new.is_empty() {
+            changes.push(LooseningChange {
+                code: "AVE-L003",
+                severity: ViolationSeverity::Warn,
+                description: format!(
+                    "Format constraint removed from {}: {} -> none",
+                    ch.path, ch.old
+                ),
+            });
+        }
+        if ch.field == "minimum" || ch.field == "maximum" {
+            let old_val = ch.old.parse::<f64>();
+            let new_val = ch.new.parse::<f64>();
+            if let (Ok(ov), Ok(nv)) = (old_val, new_val) {
+                let loosened = if ch.field == "minimum" {
+                    nv < ov
+                } else {
+                    nv > ov
+                };
+                if loosened {
+                    changes.push(LooseningChange {
+                        code: "AVE-L004",
+                        severity: ViolationSeverity::Warn,
+                        description: format!(
+                            "{} {} changed: {} -> {}",
+                            ch.path, ch.field, ch.old, ch.new
+                        ),
+                    });
+                }
+            }
+        }
+        if ch.field == "type" {
+            let specific = ["integer", "number", "boolean", "array", "object"];
+            let old_is_specific = specific.iter().any(|s| ch.old.contains(s));
+            let new_is_string = ch.new.contains("string");
+            if old_is_specific && new_is_string {
+                changes.push(LooseningChange {
+                    code: "AVE-L005",
+                    severity: ViolationSeverity::Block,
+                    description: format!(
+                        "Type changed from {} to {} at {}",
+                        ch.old, ch.new, ch.path
+                    ),
+                });
+            }
+        }
+    }
+    let old_props = old
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let new_props = new
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for name in &diff.added {
+        if let Some(prop) = new_props.get(name) {
+            let has_constraint = prop.get("format").is_some()
+                || prop.get("enum").is_some()
+                || prop.get("pattern").is_some()
+                || prop.get("minimum").is_some()
+                || prop.get("maximum").is_some()
+                || prop.get("minLength").is_some()
+                || prop.get("maxLength").is_some();
+            if !has_constraint {
+                changes.push(LooseningChange {
+                    code: "AVE-L006",
+                    severity: ViolationSeverity::Warn,
+                    description: format!("New field '{name}' without any constraints"),
+                });
+            }
+        }
+    }
+    if !old_required.is_empty() {
+        let old_count = old_required.len();
+        let new_count = new_required.len();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "required field counts won't exceed f64 mantissa"
+        )]
+        let decreased_by_half = new_count as f64 <= old_count as f64 * 0.5;
+        if decreased_by_half && new_count < old_count {
+            changes.push(LooseningChange {
+                code: "AVE-L007",
+                severity: ViolationSeverity::Block,
+                description: format!(
+                    "Required count decreased by 50%+: {old_count} -> {new_count}"
+                ),
+            });
+        }
+    }
+    let _ = (old_props, new_props);
+    let allowed = changes
+        .iter()
+        .all(|c| c.severity != ViolationSeverity::Block);
+    LooseningReport { allowed, changes }
 }
 
 fn current_timestamp() -> String {
