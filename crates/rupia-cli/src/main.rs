@@ -2,11 +2,9 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use rupia_core::diagnostic::{
-    diagnose_parse_errors, format_diagnostics, format_diagnostics_json,
-};
+use rupia_core::diagnostic::{diagnose_parse_errors, format_diagnostics, format_diagnostics_json};
 use rupia_core::guard;
 use rupia_core::types::{ParseResult, Validation};
 
@@ -83,6 +81,21 @@ enum Command {
         #[arg(short, long)]
         schema: PathBuf,
     },
+    /// AVE pipeline: schema-driven validation with confidence scoring
+    Ave {
+        /// Domain description for schema generation
+        #[arg(short, long)]
+        domain: Option<String>,
+        /// Existing JSON Schema file
+        #[arg(short, long)]
+        schema: Option<PathBuf>,
+        /// Input file to validate (- or omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+        /// Model tier: haiku, sonnet, opus
+        #[arg(short, long, default_value = "sonnet")]
+        model: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -103,6 +116,12 @@ fn main() -> ExitCode {
         } => cmd_check(&schema, input, strict, json, cli.verbose),
         Command::Random { schema, count } => cmd_random(&schema, count),
         Command::LintSchema { schema } => cmd_lint_schema(&schema),
+        Command::Ave {
+            domain,
+            schema,
+            input,
+            model,
+        } => cmd_ave(domain, schema.as_ref(), input, &model),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -266,6 +285,75 @@ fn cmd_random(schema_path: &PathBuf, count: u32) -> Result<()> {
         let value = rupia_core::random::generate(&schema);
         println!("{}", serde_json::to_string_pretty(&value)?);
     }
+    Ok(())
+}
+
+fn parse_model_tier(s: &str) -> Result<rupia_core::ave::ModelTier> {
+    match s.to_lowercase().as_str() {
+        "haiku" => Ok(rupia_core::ave::ModelTier::Haiku),
+        "sonnet" => Ok(rupia_core::ave::ModelTier::Sonnet),
+        "opus" => Ok(rupia_core::ave::ModelTier::Opus),
+        _ => bail!("unknown model tier '{s}': expected haiku, sonnet, or opus"),
+    }
+}
+
+fn cmd_ave(
+    domain: Option<String>,
+    schema_path: Option<&PathBuf>,
+    input: Option<PathBuf>,
+    model: &str,
+) -> Result<()> {
+    let tier = parse_model_tier(model)?;
+    let schema = if let Some(p) = schema_path {
+        load_schema(p)?
+    } else {
+        let domain = domain.context("either --domain or --schema is required")?;
+        let prompt = rupia_core::ave::generate_schema_prompt(&domain);
+        println!("--- Schema Generation Prompt ---\n{prompt}\n---");
+        println!("Provide the LLM response as input (stdin or --input):");
+        let raw = read_input(input.clone())?;
+        let config = rupia_core::ave::AveConfig {
+            domain,
+            model_tier: tier,
+            ..Default::default()
+        };
+        let pkg = rupia_core::ave::schema_resolve(&raw, &config).map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": pkg.schema,
+                "relations": pkg.relations.iter().map(|r| serde_json::json!({
+                    "field_a": r.field_a,
+                    "operator": r.operator,
+                    "field_b": r.field_b,
+                })).collect::<Vec<_>>(),
+                "summary": pkg.summary,
+                "counterexamples_count": pkg.counterexamples.len(),
+            }))?
+        );
+        return Ok(());
+    };
+    let raw = read_input(input)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).or_else(|_| match rupia_core::lenient::parse(&raw) {
+            ParseResult::Success(v) => Ok(v),
+            ParseResult::Failure { errors, .. } => {
+                bail!("parse failed with {} error(s)", errors.len())
+            }
+        })?;
+    let results = rupia_core::ave::validate_with_confidence(&parsed, &schema, &[]);
+    let output: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "field": r.field,
+                "status": format!("{:?}", r.status),
+                "confidence": r.confidence,
+                "coercion": r.coercion,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 
