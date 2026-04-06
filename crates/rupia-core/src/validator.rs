@@ -10,10 +10,12 @@ pub fn validate_strict(value: &Value, schema: &Value) -> Validation<Value> {
     validate_with_options(value, schema, true)
 }
 
+const MAX_REF_DEPTH: u32 = 64;
+
 fn validate_with_options(value: &Value, schema: &Value, equals: bool) -> Validation<Value> {
     let defs = schema.get("$defs").or_else(|| schema.get("definitions"));
     let mut errors = Vec::new();
-    validate_value(value, schema, defs, "$input", true, equals, &mut errors);
+    validate_value(value, schema, defs, "$input", true, equals, &mut errors, 0);
     if errors.is_empty() {
         Validation::Success(value.clone())
     } else {
@@ -24,6 +26,11 @@ fn validate_with_options(value: &Value, schema: &Value, equals: bool) -> Validat
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "depth tracking adds 1 param"
+)]
 fn validate_value(
     value: &Value,
     schema: &Value,
@@ -32,6 +39,7 @@ fn validate_value(
     required: bool,
     equals: bool,
     errors: &mut Vec<ValidationError>,
+    depth: u32,
 ) {
     if schema.get("type").is_none()
         && schema.get("$ref").is_none()
@@ -43,11 +51,29 @@ fn validate_value(
         return;
     }
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        if depth > MAX_REF_DEPTH {
+            errors.push(ValidationError {
+                path: path.to_owned(),
+                expected: "non-circular $ref".into(),
+                value: value.clone(),
+                description: Some(format!("$ref depth exceeded {MAX_REF_DEPTH}")),
+            });
+            return;
+        }
         let key = r
             .strip_prefix("#/$defs/")
             .or_else(|| r.strip_prefix("#/definitions/"));
         if let Some(resolved) = key.and_then(|k| defs?.get(k)) {
-            validate_value(value, resolved, defs, path, required, equals, errors);
+            validate_value(
+                value,
+                resolved,
+                defs,
+                path,
+                required,
+                equals,
+                errors,
+                depth + 1,
+            );
             return;
         }
         return;
@@ -64,6 +90,7 @@ fn validate_value(
                 required,
                 equals,
                 errors,
+                depth,
             );
             return;
         }
@@ -113,18 +140,21 @@ fn validate_value(
         }
         Value::Number(n) => validate_number(n, schema, path, errors),
         Value::String(s) => validate_string(s, schema, path, errors),
-        Value::Array(arr) => validate_array(arr, schema, defs, path, equals, errors),
-        Value::Object(obj) => validate_object(obj, schema, defs, path, equals, errors),
+        Value::Array(arr) => validate_array(arr, schema, defs, path, equals, errors, depth),
+        Value::Object(obj) => validate_object(obj, schema, defs, path, equals, errors, depth),
     }
 }
 
-fn resolve_variant<'a>(schema: &'a Value, defs: Option<&'a Value>) -> &'a Value {
+fn resolve_variant<'a>(schema: &'a Value, defs: Option<&'a Value>, depth: u32) -> &'a Value {
+    if depth > MAX_REF_DEPTH {
+        return schema;
+    }
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
         let key = r
             .strip_prefix("#/$defs/")
             .or_else(|| r.strip_prefix("#/definitions/"));
         if let Some(resolved) = key.and_then(|k| defs?.get(k)) {
-            return resolve_variant(resolved, defs);
+            return resolve_variant(resolved, defs, depth + 1);
         }
     }
     schema
@@ -143,6 +173,7 @@ fn validate_one_of(
     required: bool,
     equals: bool,
     errors: &mut Vec<ValidationError>,
+    depth: u32,
 ) {
     if let Some(disc) = discriminator {
         if let Some(prop_name) = disc.get("propertyName").and_then(Value::as_str) {
@@ -153,7 +184,7 @@ fn validate_one_of(
                             for variant in variants {
                                 if variant.get("$ref").and_then(Value::as_str) == Some(ref_val) {
                                     validate_value(
-                                        value, variant, defs, path, required, equals, errors,
+                                        value, variant, defs, path, required, equals, errors, depth,
                                     );
                                     return;
                                 }
@@ -162,13 +193,13 @@ fn validate_one_of(
                     }
                 }
                 for variant in variants {
-                    let resolved = resolve_variant(variant, defs);
+                    let resolved = resolve_variant(variant, defs, depth);
                     if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
                         if let Some(prop_schema) = props.get(prop_name) {
                             if let Some(enums) = prop_schema.get("enum").and_then(Value::as_array) {
                                 if enums.contains(disc_val) {
                                     validate_value(
-                                        value, variant, defs, path, required, equals, errors,
+                                        value, variant, defs, path, required, equals, errors, depth,
                                     );
                                     return;
                                 }
@@ -189,6 +220,7 @@ fn validate_one_of(
             required,
             equals,
             &mut sub_errors,
+            depth,
         );
         if sub_errors.is_empty() {
             return;
@@ -346,6 +378,7 @@ fn validate_array(
     path: &str,
     equals: bool,
     errors: &mut Vec<ValidationError>,
+    depth: u32,
 ) {
     if !is_type(schema, "array") {
         errors.push(ValidationError {
@@ -394,6 +427,7 @@ fn validate_array(
                 true,
                 equals,
                 errors,
+                depth,
             );
         }
     }
@@ -406,6 +440,7 @@ fn validate_object(
     path: &str,
     equals: bool,
     errors: &mut Vec<ValidationError>,
+    depth: u32,
 ) {
     if !is_type(schema, "object") {
         errors.push(ValidationError {
@@ -447,6 +482,7 @@ fn validate_object(
                     true,
                     equals,
                     errors,
+                    depth,
                 );
             }
         }
@@ -627,5 +663,41 @@ mod tests {
         let schema = json!({"type": "array", "items": {"type": "object"}, "uniqueItems": true});
         assert!(validate(&json!([{"a":1},{"b":2}]), &schema).is_success());
         assert!(!validate(&json!([{"a":1},{"a":1}]), &schema).is_success());
+    }
+
+    #[test]
+    fn circular_ref_returns_error() {
+        let schema = json!({
+            "$ref": "#/$defs/A",
+            "$defs": { "A": { "$ref": "#/$defs/A" } }
+        });
+        let result = validate(&json!("test"), &schema);
+        assert!(!result.is_success());
+    }
+
+    #[test]
+    fn self_referencing_ref_returns_error() {
+        let schema = json!({
+            "$ref": "#/$defs/Node",
+            "$defs": {
+                "Node": {
+                    "$ref": "#/$defs/Leaf"
+                },
+                "Leaf": {
+                    "$ref": "#/$defs/Node"
+                }
+            }
+        });
+        let result = validate(&json!(42), &schema);
+        assert!(!result.is_success());
+    }
+
+    #[test]
+    fn empty_schema_validates_everything() {
+        let schema = json!({});
+        assert!(validate(&json!("hello"), &schema).is_success());
+        assert!(validate(&json!(42), &schema).is_success());
+        assert!(validate(&json!(null), &schema).is_success());
+        assert!(validate(&json!({"a": 1}), &schema).is_success());
     }
 }

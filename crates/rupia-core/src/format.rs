@@ -6,6 +6,9 @@ use std::sync::OnceLock;
     reason = "22 format dispatch, splitting reduces readability"
 )]
 pub fn validate(s: &str, format: &str) -> bool {
+    if s.len() > 10_000 {
+        return false;
+    }
     match format {
         "email" => re_match(
             s,
@@ -188,5 +191,14 @@ mod tests {
         assert!(validate("0/foo", "relative-json-pointer"));
         assert!(validate("https://example.com", "iri"));
         assert_eq!(supported_formats().len(), 22);
+    }
+
+    #[test]
+    fn rejects_oversized_string() {
+        let huge = "a".repeat(200_000) + "@example.com";
+        assert!(!validate(&huge, "email"));
+        assert!(!validate(&huge, "uri"));
+        assert!(!validate(&huge, "hostname"));
+        assert!(!validate(&huge, "uuid"));
     }
 }
