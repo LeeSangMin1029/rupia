@@ -9,4 +9,5 @@ Cargo.lock
 .env
 .env.*
 /docs/
+/experiments/
 .claude/
