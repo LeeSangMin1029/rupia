@@ -193,3 +193,112 @@ async fn harness_loop_first_try() {
     .unwrap();
     assert_eq!(result.attempts, 1);
 }
+
+#[derive(Debug, Deserialize, JsonSchema, Harness)]
+struct Constrained {
+    #[rupia(format = "email")]
+    email: String,
+    #[rupia(min = 0, max = 150)]
+    age: u32,
+    #[rupia(min_length = 1, max_length = 50)]
+    name: String,
+    #[rupia(pattern = r"^[A-Z]{2}\d{4}$")]
+    code: String,
+}
+
+#[test]
+fn rupia_attr_format_injected() {
+    let schema = Constrained::rupia_schema();
+    assert_eq!(schema["properties"]["email"]["format"], "email");
+}
+
+#[test]
+fn rupia_attr_min_max_injected() {
+    let schema = Constrained::rupia_schema();
+    assert_eq!(schema["properties"]["age"]["minimum"], 0.0);
+    assert_eq!(schema["properties"]["age"]["maximum"], 150.0);
+}
+
+#[test]
+fn rupia_attr_length_injected() {
+    let schema = Constrained::rupia_schema();
+    assert_eq!(schema["properties"]["name"]["minLength"], 1);
+    assert_eq!(schema["properties"]["name"]["maxLength"], 50);
+}
+
+#[test]
+fn rupia_attr_pattern_injected() {
+    let schema = Constrained::rupia_schema();
+    assert_eq!(schema["properties"]["code"]["pattern"], r"^[A-Z]{2}\d{4}$");
+}
+
+#[test]
+fn rupia_attr_validation_enforced() {
+    let schema = Constrained::rupia_schema();
+    let raw = r#"{"email":"not-email","age":200,"name":"","code":"bad"}"#;
+    let result = parse_validate(raw, &schema);
+    assert!(!result.is_success());
+}
+
+#[test]
+fn rupia_attr_valid_data_passes() {
+    let schema = Constrained::rupia_schema();
+    let raw = r#"{"email":"user@example.com","age":25,"name":"Alice","code":"AB1234"}"#;
+    let result = parse_validate(raw, &schema);
+    assert!(result.is_success());
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Harness)]
+struct NoAttrs {
+    plain: String,
+}
+
+#[test]
+fn no_rupia_attr_still_works() {
+    let schema = NoAttrs::rupia_schema();
+    assert!(schema["properties"]["plain"].is_object());
+    let raw = r#"{"plain":"hello"}"#;
+    let result = parse_validate(raw, &schema);
+    assert!(result.is_success());
+}
+
+#[test]
+fn rule_engine_e2e_with_check() {
+    use rupia_core::ave::{JsonLogicRule, RuleEngine};
+    let rules = vec![
+        JsonLogicRule {
+            description: "total = subtotal + tax".into(),
+            logic: json!({"==": [{"var": "total"}, {"+": [{"var": "subtotal"}, {"var": "tax"}]}]}),
+        },
+        JsonLogicRule {
+            description: "shipped needs tracking".into(),
+            logic: json!({"if": [
+                {"==": [{"var": "status"}, "shipped"]},
+                {"!!": {"var": "tracking"}},
+                true
+            ]}),
+        },
+    ];
+    let engine = RuleEngine::new(&rules);
+    assert!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "pending"})).is_empty());
+    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "pending"})).len(), 1);
+    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "shipped"})).len(), 1);
+    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "shipped"})).len(), 2);
+    assert!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "shipped", "tracking": "TRK1"})).is_empty());
+}
+
+#[test]
+fn rule_engine_batch_e2e() {
+    use rupia_core::ave::{JsonLogicRule, RuleEngine};
+    let rules = vec![JsonLogicRule {
+        description: "amount > 0".into(),
+        logic: json!({">": [{"var": "amount"}, 0]}),
+    }];
+    let engine = RuleEngine::new(&rules);
+    let items: Vec<serde_json::Value> = (0..100)
+        .map(|i| json!({"amount": i as i64 - 50}))
+        .collect();
+    let failures = engine.evaluate_batch(&items);
+    assert_eq!(failures.len(), 51);
+    assert_eq!(failures[0].0, 0);
+}
