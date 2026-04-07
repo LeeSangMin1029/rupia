@@ -15,3 +15,4 @@ pub mod boundary;
 pub mod schema_util;
 pub mod registry;
 pub mod task_schemas;
+pub mod embed;

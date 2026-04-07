@@ -8,6 +8,8 @@ Cargo.lock
 .gstack/
 .env
 .env.*
-/docs/
-/experiments/
+/docs/design-*.md
+/docs/discussion-*.md
+/docs/ave-*.md
+/experiments/ave-test/
 .claude/

@@ -4,8 +4,100 @@ use crate::lenient;
 use crate::schema_util;
 use crate::types::ParseResult;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoercionLog {
+    pub field: String,
+    pub original: Value,
+    pub coerced: Value,
+    pub coercion_type: String,
+}
+
 pub fn coerce_with_schema(value: Value, schema: &Value) -> Value {
     coerce_value(value, schema, schema, 0)
+}
+
+pub fn coerce_with_schema_logged(value: Value, schema: &Value) -> (Value, Vec<CoercionLog>) {
+    let original = value.clone();
+    let coerced = coerce_with_schema(value, schema);
+    let mut logs = Vec::new();
+    diff_values(&original, &coerced, "", &mut logs);
+    (coerced, logs)
+}
+
+fn diff_values(original: &Value, coerced: &Value, path: &str, logs: &mut Vec<CoercionLog>) {
+    if original == coerced {
+        return;
+    }
+    match (original, coerced) {
+        (Value::Object(orig_obj), Value::Object(coerced_obj)) => {
+            for (key, coerced_val) in coerced_obj {
+                let field_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match orig_obj.get(key) {
+                    Some(orig_val) => diff_values(orig_val, coerced_val, &field_path, logs),
+                    None => {
+                        logs.push(CoercionLog {
+                            field: field_path,
+                            original: Value::Null,
+                            coerced: coerced_val.clone(),
+                            coercion_type: "default_fill".into(),
+                        });
+                    }
+                }
+            }
+        }
+        (Value::Array(orig_arr), Value::Array(coerced_arr)) => {
+            for (i, (o, c)) in orig_arr.iter().zip(coerced_arr.iter()).enumerate() {
+                let field_path = if path.is_empty() {
+                    format!("[{i}]")
+                } else {
+                    format!("{path}[{i}]")
+                };
+                diff_values(o, c, &field_path, logs);
+            }
+        }
+        _ => {
+            let coercion_type = infer_coercion_type(original, coerced);
+            logs.push(CoercionLog {
+                field: path.to_owned(),
+                original: original.clone(),
+                coerced: coerced.clone(),
+                coercion_type,
+            });
+        }
+    }
+}
+
+fn infer_coercion_type(original: &Value, coerced: &Value) -> String {
+    match (original, coerced) {
+        (Value::String(_), Value::Number(n)) => {
+            if n.is_i64() || n.is_u64() {
+                "string_to_int".into()
+            } else {
+                "string_to_number".into()
+            }
+        }
+        (Value::String(_), Value::Bool(_)) => "string_to_bool".into(),
+        (Value::String(_), Value::Null) => "string_to_null".into(),
+        (Value::String(_), Value::Object(_)) => "string_to_object".into(),
+        (Value::String(_), Value::Array(_)) => "string_to_array".into(),
+        (Value::String(a), Value::String(b)) => {
+            if a.to_lowercase() == b.to_lowercase() {
+                "enum_case".into()
+            } else if a.trim() == b.as_str() {
+                "string_trim".into()
+            } else {
+                "string_transform".into()
+            }
+        }
+        (Value::Number(_), Value::String(_)) => "number_to_string".into(),
+        (Value::Bool(_), Value::String(_)) => "bool_to_string".into(),
+        (Value::Null, _) => "default_fill".into(),
+        _ => "unknown".into(),
+    }
 }
 
 fn coerce_value(value: Value, schema: &Value, root: &Value, depth: u32) -> Value {
@@ -533,6 +625,40 @@ mod tests {
         let schema = json!({"const": 42});
         assert_eq!(coerce_with_schema(json!("42"), &schema), json!("42"));
         assert_eq!(coerce_with_schema(json!(42), &schema), json!(42));
+    }
+
+    #[test]
+    fn coerce_logged_tracks_changes() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "age": {"type": "integer"},
+                "role": {"type": "string", "enum": ["admin", "user", "guest"]}
+            },
+            "required": ["age", "role"]
+        });
+        let input = json!({"age": "25", "role": "Admin"});
+        let (result, logs) = coerce_with_schema_logged(input, &schema);
+        assert_eq!(result["age"], json!(25));
+        assert_eq!(result["role"], json!("admin"));
+        assert_eq!(logs.len(), 2);
+        let age_log = logs.iter().find(|l| l.field == "age").expect("age log");
+        assert_eq!(age_log.original, json!("25"));
+        assert_eq!(age_log.coerced, json!(25));
+        assert_eq!(age_log.coercion_type, "string_to_int");
+        let role_log = logs.iter().find(|l| l.field == "role").expect("role log");
+        assert_eq!(role_log.original, json!("Admin"));
+        assert_eq!(role_log.coerced, json!("admin"));
+        assert_eq!(role_log.coercion_type, "enum_case");
+    }
+
+    #[test]
+    fn coerce_logged_no_changes() {
+        let schema = json!({"type": "object", "properties": {"name": {"type": "string"}}});
+        let input = json!({"name": "test"});
+        let (result, logs) = coerce_with_schema_logged(input.clone(), &schema);
+        assert_eq!(result, input);
+        assert!(logs.is_empty());
     }
 
     #[test]

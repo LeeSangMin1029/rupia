@@ -1,0 +1,168 @@
+   Compiling num-traits v0.2.19
+   Compiling parking_lot_core v0.9.12
+   Compiling zerocopy-derive v0.8.48
+   Compiling tokio-macros v2.7.0
+   Compiling serde_json v1.0.149
+   Compiling serde v1.0.228
+   Compiling parking_lot v0.12.5
+   Compiling regex v1.12.3
+   Compiling tokio v1.51.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling fluent-uri v0.3.2
+   Compiling num-integer v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling email_address v0.2.9
+   Compiling plotters v0.3.7
+   Compiling schemars v0.8.22
+   Compiling tinytemplate v1.2.1
+   Compiling zerocopy v0.8.48
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling fraction v0.15.3
+   Compiling tower v0.5.3
+   Compiling hyper v1.9.0
+   Compiling ahash v0.8.12
+   Compiling half v2.7.1
+   Compiling referencing v0.28.3
+   Compiling ciborium-ll v0.2.2
+   Compiling tower-http v0.6.8
+   Compiling ciborium v0.2.2
+   Compiling hyper-util v0.1.20
+   Compiling criterion v0.5.1
+   Compiling reqwest v0.12.28
+   Compiling jsonschema v0.28.3
+   Compiling rupia-core v0.1.0 (C:\Users\sangm\Desktop\project\rupia\crates\rupia-core)
+    Finished `bench` profile [optimized] target(s) in 35.87s
+     Running benches\throughput.rs (target\release\deps\throughput-ddf8c4ce529e790e.exe)
+Gnuplot not found, using plotters backend
+Benchmarking lenient_parse/valid_small/56
+Benchmarking lenient_parse/valid_small/56: Warming up for 3.0000 s
+Benchmarking lenient_parse/valid_small/56: Collecting 100 samples in estimated 5.0005 s (7.5M iterations)
+Benchmarking lenient_parse/valid_small/56: Analyzing
+lenient_parse/valid_small/56
+                        time:   [657.15 ns 660.41 ns 664.23 ns]
+                        thrpt:  [80.402 MiB/s 80.868 MiB/s 81.269 MiB/s]
+                 change:
+                        time:   [-3.1299% -1.6512% -0.1497%] (p = 0.07 > 0.05)
+                        thrpt:  [+0.1499% +1.6789% +3.2311%]
+                        No change in performance detected.
+Found 12 outliers among 100 measurements (12.00%)
+  5 (5.00%) high mild
+  7 (7.00%) high severe
+Benchmarking lenient_parse/valid_medium/4004
+Benchmarking lenient_parse/valid_medium/4004: Warming up for 3.0000 s
+Benchmarking lenient_parse/valid_medium/4004: Collecting 100 samples in estimated 5.0095 s (101k iterations)
+Benchmarking lenient_parse/valid_medium/4004: Analyzing
+lenient_parse/valid_medium/4004
+                        time:   [48.921 µs 49.199 µs 49.506 µs]
+                        thrpt:  [77.132 MiB/s 77.614 MiB/s 78.055 MiB/s]
+                 change:
+                        time:   [-1.3520% -0.7405% -0.1203%] (p = 0.10 > 0.05)
+                        thrpt:  [+0.1204% +0.7460% +1.3705%]
+                        No change in performance detected.
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking lenient_parse/malformed/160
+Benchmarking lenient_parse/malformed/160: Warming up for 3.0000 s
+Benchmarking lenient_parse/malformed/160: Collecting 100 samples in estimated 5.0055 s (2.9M iterations)
+Benchmarking lenient_parse/malformed/160: Analyzing
+lenient_parse/malformed/160
+                        time:   [1.7093 µs 1.7210 µs 1.7349 µs]
+                        thrpt:  [87.953 MiB/s 88.664 MiB/s 89.271 MiB/s]
+                 change:
+                        time:   [-1.0452% +0.2450% +1.6472%] (p = 0.73 > 0.05)
+                        thrpt:  [-1.6205% -0.2444% +1.0563%]
+                        No change in performance detected.
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking coerce/member_with_string_age
+Benchmarking coerce/member_with_string_age: Warming up for 3.0000 s
+Benchmarking coerce/member_with_string_age: Collecting 100 samples in estimated 5.0004 s (2.4M iterations)
+Benchmarking coerce/member_with_string_age: Analyzing
+coerce/member_with_string_age
+                        time:   [2.0307 µs 2.0435 µs 2.0583 µs]
+                        change: [+46.051% +47.338% +48.782%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking coerce/50_items_array
+Benchmarking coerce/50_items_array: Warming up for 3.0000 s
+Benchmarking coerce/50_items_array: Collecting 100 samples in estimated 5.5372 s (35k iterations)
+Benchmarking coerce/50_items_array: Analyzing
+coerce/50_items_array   time:   [156.39 µs 157.32 µs 158.42 µs]
+                        change: [+23.506% +24.857% +26.350%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+
+Benchmarking validate/valid_member
+Benchmarking validate/valid_member: Warming up for 3.0000 s
+Benchmarking validate/valid_member: Collecting 100 samples in estimated 5.0223 s (227k iterations)
+Benchmarking validate/valid_member: Analyzing
+validate/valid_member   time:   [21.832 µs 22.021 µs 22.231 µs]
+                        change: [+1273.8% +1282.5% +1292.5%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking validate/invalid_member
+Benchmarking validate/invalid_member: Warming up for 3.0000 s
+Benchmarking validate/invalid_member: Collecting 100 samples in estimated 5.0358 s (192k iterations)
+Benchmarking validate/invalid_member: Analyzing
+validate/invalid_member time:   [25.872 µs 25.983 µs 26.105 µs]
+                        change: [+831.89% +853.14% +874.95%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking validate/50_items_valid
+Benchmarking validate/50_items_valid: Warming up for 3.0000 s
+Benchmarking validate/50_items_valid: Collecting 100 samples in estimated 5.0915 s (50k iterations)
+Benchmarking validate/50_items_valid: Analyzing
+validate/50_items_valid time:   [99.330 µs 100.05 µs 100.81 µs]
+                        change: [-31.995% -31.009% -29.987%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  7 (7.00%) high mild
+
+Benchmarking feedback/3_errors
+Benchmarking feedback/3_errors: Warming up for 3.0000 s
+Benchmarking feedback/3_errors: Collecting 100 samples in estimated 5.0321 s (621k iterations)
+Benchmarking feedback/3_errors: Analyzing
+feedback/3_errors       time:   [8.0202 µs 8.0934 µs 8.1784 µs]
+                        change: [+38.142% +39.080% +40.048%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking full_pipeline/valid_input
+Benchmarking full_pipeline/valid_input: Warming up for 3.0000 s
+Benchmarking full_pipeline/valid_input: Collecting 100 samples in estimated 5.0977 s (202k iterations)
+Benchmarking full_pipeline/valid_input: Analyzing
+full_pipeline/valid_input
+                        time:   [24.559 µs 24.769 µs 25.006 µs]
+                        change: [+661.93% +668.55% +675.67%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking full_pipeline/malformed_input
+Benchmarking full_pipeline/malformed_input: Warming up for 3.0000 s
+Benchmarking full_pipeline/malformed_input: Collecting 100 samples in estimated 5.0729 s (192k iterations)
+Benchmarking full_pipeline/malformed_input: Analyzing
+full_pipeline/malformed_input
+                        time:   [26.297 µs 26.469 µs 26.665 µs]
+                        change: [+497.40% +502.27% +507.64%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+

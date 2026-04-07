@@ -575,10 +575,48 @@ pub fn cross_reference_schemas(schemas: &[Value]) -> CrossRefResult {
             &mut divergences,
         );
     }
+    #[cfg(feature = "semantic")]
+    collect_semantic_field_matches(&all_flat, &mut divergences);
     CrossRefResult {
         universal_enums,
         universal_constraints,
         divergences,
+    }
+}
+
+#[cfg(feature = "semantic")]
+fn collect_semantic_field_matches(
+    all_flat: &[HashMap<String, Value>],
+    divergences: &mut Vec<Divergence>,
+) {
+    let all_fields: Vec<String> = all_flat
+        .iter()
+        .flat_map(|m| m.keys().cloned())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    if all_fields.len() < 2 {
+        return;
+    }
+    let field_refs: Vec<&str> = all_fields.iter().map(|s| s.as_str()).collect();
+    let matches = crate::embed::embed_batch_compare(&field_refs, &field_refs);
+    for (qi, ci, sim) in matches {
+        if qi >= ci {
+            continue;
+        }
+        if sim < 0.8 {
+            continue;
+        }
+        if all_fields[qi] == all_fields[ci] {
+            continue;
+        }
+        divergences.push(Divergence {
+            field_pattern: format!("{} ~ {}", all_fields[qi], all_fields[ci]),
+            description: format!(
+                "semantically similar fields (cosine={:.2}), consider unifying",
+                sim
+            ),
+        });
     }
 }
 
