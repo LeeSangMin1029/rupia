@@ -194,16 +194,16 @@ async fn harness_loop_first_try() {
     assert_eq!(result.attempts, 1);
 }
 
-#[derive(Debug, Deserialize, JsonSchema, Harness)]
+#[derive(Debug, Deserialize, JsonSchema, Harness, PartialEq)]
 struct Constrained {
     #[rupia(format = "email")]
-    email: String,
+    pub email: String,
     #[rupia(min = 0, max = 150)]
-    age: u32,
+    pub age: u32,
     #[rupia(min_length = 1, max_length = 50)]
-    name: String,
+    pub name: String,
     #[rupia(pattern = r"^[A-Z]{2}\d{4}$")]
-    code: String,
+    pub code: String,
 }
 
 #[test]
@@ -242,24 +242,24 @@ fn rupia_attr_validation_enforced() {
 
 #[test]
 fn rupia_attr_valid_data_passes() {
-    let schema = Constrained::rupia_schema();
     let raw = r#"{"email":"user@example.com","age":25,"name":"Alice","code":"AB1234"}"#;
-    let result = parse_validate(raw, &schema);
-    assert!(result.is_success());
+    let c: Constrained = parse_validate_typed(raw).unwrap();
+    assert_eq!(c.email, "user@example.com");
+    assert_eq!(c.age, 25);
+    assert_eq!(c.name, "Alice");
+    assert_eq!(c.code, "AB1234");
 }
 
-#[derive(Debug, Deserialize, JsonSchema, Harness)]
+#[derive(Debug, Deserialize, JsonSchema, Harness, PartialEq)]
 struct NoAttrs {
-    plain: String,
+    pub plain: String,
 }
 
 #[test]
 fn no_rupia_attr_still_works() {
-    let schema = NoAttrs::rupia_schema();
-    assert!(schema["properties"]["plain"].is_object());
     let raw = r#"{"plain":"hello"}"#;
-    let result = parse_validate(raw, &schema);
-    assert!(result.is_success());
+    let n: NoAttrs = parse_validate_typed(raw).unwrap();
+    assert_eq!(n.plain, "hello");
 }
 
 #[test]
@@ -296,7 +296,7 @@ fn rule_engine_batch_e2e() {
     }];
     let engine = RuleEngine::new(&rules);
     let items: Vec<serde_json::Value> = (0..100)
-        .map(|i| json!({"amount": i as i64 - 50}))
+        .map(|i| json!({"amount": i64::from(i) - 50}))
         .collect();
     let failures = engine.evaluate_batch(&items);
     assert_eq!(failures.len(), 51);

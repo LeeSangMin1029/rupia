@@ -76,7 +76,18 @@ fn iterate(input: &str) -> ParseResult<serde_json::Value> {
             }],
         };
     }
-    let json_input = &json_source[json_start.unwrap()..];
+    let Some(start_idx) = json_start else {
+        return ParseResult::Failure {
+            data: None,
+            input: input.to_owned(),
+            errors: vec![ParseError {
+                path: "$input".into(),
+                expected: "JSON value".into(),
+                description: Some("no JSON start found".into()),
+            }],
+        };
+    };
+    let json_input = &json_source[start_idx..];
     let mut errors = Vec::new();
     let mut parser = LenientParser::new(json_input, &mut errors);
     let data = parser.parse();

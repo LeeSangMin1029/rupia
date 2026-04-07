@@ -1,11 +1,16 @@
 use crate::schema_ops::{CrossRefResult, Divergence, UniversalConstraint, UniversalEnum};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const APIS_GURU_LIST: &str = "https://api.apis.guru/v2/list.json";
 const CACHE_DIR: &str = ".cache/rupia";
 const LIST_CACHE_HOURS: u64 = 24;
 const SPEC_CACHE_DAYS: u64 = 7;
+const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+const RETRY_DELAY_MS: u64 = 1000;
+const RATE_LIMIT_MS: u64 = 200;
 
 #[derive(Debug, Clone)]
 pub struct ApiInfo {
@@ -51,6 +56,104 @@ fn is_cache_fresh(path: &std::path::Path, max_age_secs: u64) -> bool {
     elapsed.as_secs() < max_age_secs
 }
 
+fn validate_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("[RUPIA-SEC001] invalid URL scheme: {url}"));
+    }
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let blocked = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "[::1]",
+        "169.254.169.254",
+        "metadata.google.internal",
+    ];
+    if blocked.iter().any(|b| host.eq_ignore_ascii_case(b)) {
+        return Err(format!("[RUPIA-SEC002] blocked host: {host}"));
+    }
+    if host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("172.16.")
+        || host.starts_with("172.17.")
+        || host.starts_with("172.18.")
+        || host.starts_with("172.19.")
+        || host.starts_with("172.2")
+        || host.starts_with("172.3")
+    {
+        return Err(format!("[RUPIA-SEC003] private network blocked: {host}"));
+    }
+    Ok(())
+}
+
+fn build_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("[RUPIA-NET000] failed to build HTTP client: {e}"))
+}
+
+fn safe_get(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    context: &str,
+) -> Result<String, String> {
+    validate_url(url)?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("[RUPIA-NET001] network error {context}: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("[RUPIA-NET004] HTTP {status} for {context}"));
+    }
+    let content_length =
+        usize::try_from(response.content_length().unwrap_or(0)).unwrap_or(usize::MAX);
+    if content_length > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "[RUPIA-SEC004] response too large ({content_length} bytes) for {context}"
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("[RUPIA-NET002] failed to read body {context}: {e}"))?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "[RUPIA-SEC004] response too large ({} bytes) for {context}",
+            bytes.len()
+        ));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| format!("[RUPIA-NET005] non-UTF8 response {context}: {e}"))
+}
+
+fn safe_get_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    context: &str,
+) -> Result<String, String> {
+    match safe_get(client, url, context) {
+        Ok(body) => Ok(body),
+        Err(first_err) => {
+            std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+            safe_get(client, url, context).map_err(|_| first_err)
+        }
+    }
+}
+
+fn rate_limit() {
+    std::thread::sleep(Duration::from_millis(RATE_LIMIT_MS));
+}
+
 pub fn fetch_api_list() -> Result<Value, String> {
     let dir = cache_dir();
     let cache_path = dir.join("list.json");
@@ -60,10 +163,8 @@ pub fn fetch_api_list() -> Result<Value, String> {
         return serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse cached list: {e}"));
     }
-    let body = reqwest::blocking::get(APIS_GURU_LIST)
-        .map_err(|e| format!("[RUPIA-NET001] network error fetching API list: {e}"))?
-        .text()
-        .map_err(|e| format!("[RUPIA-NET002] failed to read response body: {e}"))?;
+    let client = build_client()?;
+    let body = safe_get_with_retry(&client, APIS_GURU_LIST, "API list")?;
     let val: Value = serde_json::from_str(&body)
         .map_err(|e| format!("[RUPIA-NET003] API list is not valid JSON: {e}"))?;
     std::fs::create_dir_all(&dir).ok();
@@ -131,7 +232,7 @@ pub fn search_apis(list: &Value, keyword: &str, max_results: usize) -> Vec<ApiIn
 
 pub fn fetch_spec(url: &str, name: &str) -> Result<Value, String> {
     let dir = cache_dir().join("specs");
-    let safe_name = name.replace(['/', '\\', ':', ' '], "_");
+    let safe_name = sanitize_path_component(name);
     let cache_path = dir.join(format!("{safe_name}.json"));
     if is_cache_fresh(&cache_path, SPEC_CACHE_DAYS * 24 * 3600) {
         let content = std::fs::read_to_string(&cache_path)
@@ -139,10 +240,8 @@ pub fn fetch_spec(url: &str, name: &str) -> Result<Value, String> {
         return serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse cached spec: {e}"));
     }
-    let body = reqwest::blocking::get(url)
-        .map_err(|e| format!("[RUPIA-NET001] network error fetching spec '{name}': {e}"))?
-        .text()
-        .map_err(|e| format!("[RUPIA-NET002] failed to read spec body '{name}': {e}"))?;
+    let client = build_client()?;
+    let body = safe_get_with_retry(&client, url, &format!("spec '{name}'"))?;
     let val: Value = serde_json::from_str(&body)
         .map_err(|e| format!("[RUPIA-NET003] spec '{name}' is not valid JSON: {e}"))?;
     std::fs::create_dir_all(&dir).ok();
@@ -151,12 +250,15 @@ pub fn fetch_spec(url: &str, name: &str) -> Result<Value, String> {
 }
 
 pub fn fetch_spec_fresh(url: &str, name: &str) -> Result<Value, String> {
-    let body = reqwest::blocking::get(url)
-        .map_err(|e| format!("[RUPIA-NET001] network error fetching spec '{name}': {e}"))?
-        .text()
-        .map_err(|e| format!("[RUPIA-NET002] failed to read spec body '{name}': {e}"))?;
+    let client = build_client()?;
+    let body = safe_get_with_retry(&client, url, &format!("spec '{name}'"))?;
     serde_json::from_str(&body)
         .map_err(|e| format!("[RUPIA-NET003] spec '{name}' is not valid JSON: {e}"))
+}
+
+pub(crate) fn sanitize_path_component(name: &str) -> String {
+    name.replace(['/', '\\', ':', ' ', '.'], "_")
+        .replace("..", "_")
 }
 
 pub fn cross_ref_by_domain(
@@ -186,6 +288,7 @@ pub fn cross_ref_by_domain(
                 eprintln!("[warn] skipping {}: {e}", api.name);
             }
         }
+        rate_limit();
     }
     if specs.is_empty() {
         return Err(format!(
@@ -308,5 +411,38 @@ mod tests {
         let list = mock_list();
         let results = search_apis(&list, "paypal", 10);
         assert_eq!(results[0].name, "paypal.com");
+    }
+
+    #[test]
+    fn ssrf_blocks_localhost() {
+        assert!(validate_url("http://localhost/secret").is_err());
+        assert!(validate_url("http://127.0.0.1/secret").is_err());
+        assert!(validate_url("http://169.254.169.254/metadata").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_private_networks() {
+        assert!(validate_url("http://10.0.0.1/internal").is_err());
+        assert!(validate_url("http://192.168.1.1/admin").is_err());
+        assert!(validate_url("http://172.16.0.1/api").is_err());
+    }
+
+    #[test]
+    fn ssrf_allows_public_urls() {
+        assert!(validate_url("https://api.apis.guru/v2/list.json").is_ok());
+        assert!(validate_url("https://example.com/spec.json").is_ok());
+    }
+
+    #[test]
+    fn ssrf_blocks_invalid_scheme() {
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("ftp://internal/data").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_blocks_traversal() {
+        assert!(!sanitize_path_component("../../etc/passwd").contains(".."));
+        assert!(!sanitize_path_component("foo/../bar").contains(".."));
+        assert_eq!(sanitize_path_component("normal-api"), "normal-api");
     }
 }

@@ -82,7 +82,7 @@ pub struct ChangeSummary {
 
 fn manifest_path(domain: &str) -> PathBuf {
     let dir = fetch::cache_dir().join("sync");
-    let safe = domain.replace(['/', '\\', ':', ' '], "_");
+    let safe = fetch::sanitize_path_component(domain);
     dir.join(format!("{safe}-{MANIFEST_FILE}"))
 }
 
@@ -121,9 +121,9 @@ fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
 fn save_synced_spec(domain: &str, api_name: &str, spec: &Value) -> Result<String, String> {
     let dir = fetch::cache_dir()
         .join("sync")
-        .join(domain.replace(['/', '\\', ':', ' '], "_"));
+        .join(fetch::sanitize_path_component(domain));
     std::fs::create_dir_all(&dir).ok();
-    let safe = api_name.replace(['/', '\\', ':', ' '], "_");
+    let safe = fetch::sanitize_path_component(api_name);
     let path = dir.join(format!("{safe}.json"));
     let json =
         serde_json::to_string_pretty(spec).map_err(|e| format!("failed to serialize spec: {e}"))?;
