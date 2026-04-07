@@ -1,53 +1,123 @@
 # rupia
 
-LLM 출력 검증 하네스. AI가 뭘 뱉든 고치고, 검증하고, 틀리면 AI가 스스로 고치게 만드는 도구.
+LLM output validation harness. Parse broken JSON, coerce types, validate against schemas, generate feedback so the AI fixes itself.
 
-## 설치
+## Install
 
 ```bash
+# From crates.io
+cargo install rupia-cli
+
+# From source
 cargo install --git https://github.com/LeeSangMin1029/rupia rupia-cli
 ```
 
-## 사용
+Pre-built binaries for Linux, macOS (x86_64 + ARM), and Windows are available on [Releases](https://github.com/LeeSangMin1029/rupia/releases).
 
-```bash
-# AI 출력 검증 (가장 많이 사용)
-echo "$AI_OUTPUT" | rupia check --schema schema.json --json
+## What it does
 
-# 도메인에서 스키마 자동 생성
-rupia ave --domain "쇼핑몰 주문 시스템"
+AI gives you this:
 
-# 경계값 테스트 생성
-rupia boundary-gen --schema schema.json
-
-# 랜덤 데이터 생성
-rupia random --schema schema.json --count 10
-
-# 스키마 품질 검사
-rupia lint-schema --schema schema.json
+```
+Sure! Here is your data:
+```json
+{name: "Alice", "age": "25", "role": "Admin",}
+```
 ```
 
-## 기능
+rupia turns it into this (3 microseconds, no LLM call):
 
-| 기능 | 설명 |
-|------|------|
-| 관대한 파싱 | markdown, junk prefix, trailing comma, JS 주석, unquoted key 자동 복구 |
-| 자동 교정 10가지 | `"25"`→`25`, `"Admin"`→`"admin"`, `"tag"`→`["tag"]`, default 채움, trim 등 |
-| JSON Schema 검증 | jsonschema 크레이트 (Draft 4~2020-12 전체 키워드) |
-| 피드백 생성 | `// ❌ [{"path":"$input.age","expected":"Minimum<0>"}]` 인라인 |
-| AVE 파이프라인 | 스키마 자동 생성, confidence 검증, 선택적 재시도, 스키마 진화, 버전 관리 |
-| 경계값 생성 | min/max 경계, enum, format, required — nested/allOf/$ref 지원 |
-| 다중 API 교차 분석 | apis.guru 2,529개 API에서 보편 규칙 추출 |
-| 규칙 일관성 검증 | 순서 모순, 범위 모순, 산술 불가능 감지 |
-| 안티패턴 감지 | required 0, 전부 string, root type 없음 등 8가지 |
-| 느슨화 방지 | required 제거, format 제거, type 다운그레이드 차단 |
-| 태스크 스키마 | 소/중/대 규모별 내장 + 자동 감지 |
-| LLM Function Calling | OpenAI/Claude tools 포맷 자동 생성 |
+```json
+{"name": "Alice", "age": 25, "role": "admin"}
+```
 
-## 스펙
+Markdown stripped, unquoted key fixed, trailing comma removed, `"25"` coerced to `25`, `"Admin"` lowered to match enum. If it still fails schema validation, rupia generates `// ❌` inline feedback the AI can read to fix itself.
 
-- **214 tests**, clippy clean
-- **19 modules**, ~8,000 lines
-- **0 unsafe**, 0 panic, 0 network access
-- jsonschema 크레이트 (Draft 4~2020-12)
+## Usage
+
+```bash
+# Validate AI output (most common)
+echo "$AI_OUTPUT" | rupia check --schema schema.json --json
+
+# Generate schema from domain description
+rupia ave --domain "hospital appointment system"
+
+# Boundary value test generation
+rupia boundary-gen --schema schema.json
+
+# Random test data
+rupia random --schema schema.json --count 10
+
+# Schema quality check
+rupia lint-schema --schema schema.json
+
+# Cross-reference against public APIs
+rupia cross-ref --domain "payment" --json
+
+# Monitor API changes across domains
+rupia watch --domains payment messaging maps --sync-first
+
+# LLM feedback only
+rupia feedback --schema schema.json
+```
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| Lenient parsing | Markdown blocks, junk prefix, trailing commas, JS comments, unquoted keys |
+| 10 auto-coercions | `"25"`->25, `"Admin"`->"admin", `"tag"`->["tag"], null->default, trim, etc. |
+| JSON Schema validation | jsonschema crate (Draft 4 through 2020-12, allOf/oneOf/if-then-else/not) |
+| Feedback generation | `// ❌ [{"path":"$input.age","expected":"Minimum<0>"}]` inline |
+| JSONLogic rules | Conditional required, arithmetic relations, mutual exclusion |
+| AVE pipeline | Auto schema generation, confidence scoring, selective retry, schema evolution |
+| Boundary generation | min/max, enum, format, required edges. Nested/allOf/$ref supported |
+| API cross-reference | 2,529 public APIs from apis.guru. Universal enums, constraints, divergences |
+| API change monitoring | Sync snapshots, diff for breaking changes, multi-domain watch |
+| Rule consistency | Order contradictions, range contradictions, arithmetic infeasibility |
+| Anti-pattern detection | 0 required fields, all-string, missing root type, plus 5 more |
+| Loosening prevention | Blocks required removal, format removal, type downgrade |
+| LLM Function Calling | OpenAI/Claude tools format auto-generation |
+| Custom derive attributes | `#[rupia(format="email", min=0, max=150)]` |
+
+## As a Rust library
+
+```rust
+use rupia::{Harness, HasSchema, parse_validate_typed};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema, Harness)]
+struct Order {
+    #[rupia(format = "uuid")]
+    order_id: String,
+    #[rupia(min = 0)]
+    total: f64,
+    status: String,
+}
+
+let order: Order = parse_validate_typed(raw_llm_output)?;
+```
+
+## Security
+
+10 vulnerabilities found and fixed. CSO audit: 0 critical, 0 high.
+
+- SSRF blocking (private IPs, hex/octal/IPv6 encoding, cloud metadata)
+- 50MB response size limit, 30s request timeout, rate limiting
+- Atomic cache writes (no corruption on concurrent access)
+- Prompt injection filter (20 patterns, case-insensitive, DoS-capped)
+- Unsafe mmap bounds validation (safetensors tensor size check)
+- Path traversal prevention on all cache paths
+
+See [docs/rupia-architecture.md](docs/rupia-architecture.md) for the full defense matrix.
+
+## Specs
+
+- **275 tests**, clippy clean (pedantic)
+- **21 modules**, ~10,000 lines
+- **1 unsafe** (mmap, bounds checked)
+- jsonschema crate (Draft 4 through 2020-12)
+- GitHub Actions CI (Linux/macOS/Windows)
+- [crates.io v0.2.0](https://crates.io/crates/rupia)
 - MIT license
