@@ -110,12 +110,18 @@ fn load_manifest(domain: &str) -> Option<SyncManifest> {
     serde_json::from_str(&content).ok()
 }
 
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content).map_err(|e| format!("failed to write temp file: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("failed to rename temp file: {e}"))
+}
+
 fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
     let path = manifest_path(&manifest.domain);
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     let json = serde_json::to_string_pretty(manifest)
         .map_err(|e| format!("failed to serialize manifest: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("failed to write manifest: {e}"))
+    atomic_write(&path, &json)
 }
 
 fn save_synced_spec(domain: &str, api_name: &str, spec: &Value) -> Result<String, String> {
@@ -127,7 +133,7 @@ fn save_synced_spec(domain: &str, api_name: &str, spec: &Value) -> Result<String
     let path = dir.join(format!("{safe}.json"));
     let json =
         serde_json::to_string_pretty(spec).map_err(|e| format!("failed to serialize spec: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("failed to write spec: {e}"))?;
+    atomic_write(&path, &json)?;
     Ok(path.to_string_lossy().to_string())
 }
 

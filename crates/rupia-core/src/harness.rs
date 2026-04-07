@@ -36,19 +36,23 @@ const INJECTION_PATTERNS: &[&str] = &[
     "jailbreak",
 ];
 
+const MAX_SANITIZE_PASSES: usize = 100;
+
 pub fn sanitize_feedback(feedback: &str) -> String {
     let mut result = feedback.to_owned();
-    let mut changed = true;
-    while changed {
-        changed = false;
+    for _ in 0..MAX_SANITIZE_PASSES {
         let lower = result.to_lowercase();
+        let mut found = false;
         for pattern in INJECTION_PATTERNS {
             if let Some(pos) = lower.find(pattern) {
                 let end = pos + pattern.len();
                 result.replace_range(pos..end, "[filtered]");
-                changed = true;
+                found = true;
                 break;
             }
+        }
+        if !found {
+            break;
         }
     }
     result

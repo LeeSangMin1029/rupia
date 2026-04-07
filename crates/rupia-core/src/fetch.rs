@@ -56,6 +56,13 @@ fn is_cache_fresh(path: &std::path::Path, max_age_secs: u64) -> bool {
     elapsed.as_secs() < max_age_secs
 }
 
+fn atomic_write(path: &std::path::Path, content: &str) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, content).is_ok() {
+        std::fs::rename(&tmp, path).ok();
+    }
+}
+
 fn validate_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("[RUPIA-SEC001] invalid URL scheme: {url}"));
@@ -68,31 +75,65 @@ fn validate_url(url: &str) -> Result<(), String> {
         .unwrap_or("")
         .split(':')
         .next()
-        .unwrap_or("");
-    let blocked = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "::1",
-        "[::1]",
-        "169.254.169.254",
-        "metadata.google.internal",
-    ];
-    if blocked.iter().any(|b| host.eq_ignore_ascii_case(b)) {
+        .unwrap_or("")
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if host.is_empty() {
+        return Err("[RUPIA-SEC001] empty host".to_string());
+    }
+    if host.contains(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-' && c != ':') {
+        return Err(format!("[RUPIA-SEC005] suspicious host characters: {host}"));
+    }
+    if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        if let Some(ip) = parse_ipv4(host) {
+            if is_private_ipv4(ip) {
+                return Err(format!(
+                    "[RUPIA-SEC003] private/reserved IP blocked: {host}"
+                ));
+            }
+        } else {
+            return Err(format!("[RUPIA-SEC005] invalid IP format: {host}"));
+        }
+    }
+    let blocked_hosts = ["localhost", "metadata.google.internal", "metadata.internal"];
+    let host_lower = host.to_lowercase();
+    if blocked_hosts
+        .iter()
+        .any(|b| host_lower == *b || host_lower.ends_with(&format!(".{b}")))
+    {
         return Err(format!("[RUPIA-SEC002] blocked host: {host}"));
     }
-    if host.starts_with("10.")
-        || host.starts_with("192.168.")
-        || host.starts_with("172.16.")
-        || host.starts_with("172.17.")
-        || host.starts_with("172.18.")
-        || host.starts_with("172.19.")
-        || host.starts_with("172.2")
-        || host.starts_with("172.3")
-    {
-        return Err(format!("[RUPIA-SEC003] private network blocked: {host}"));
+    if host_lower.starts_with("0x") || host_lower.starts_with("0o") {
+        return Err(format!("[RUPIA-SEC005] encoded IP format blocked: {host}"));
+    }
+    if host.contains("::") || host_lower.contains("ffff") {
+        return Err(format!(
+            "[RUPIA-SEC005] IPv6 address blocked in URL: {host}"
+        ));
     }
     Ok(())
+}
+
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (i, part) in parts.iter().enumerate() {
+        if part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        octets[i] = part.parse().ok()?;
+    }
+    Some(octets)
+}
+
+fn is_private_ipv4(ip: [u8; 4]) -> bool {
+    matches!(
+        ip,
+        [0 | 10 | 127 | 224..=255, ..] | [169, 254, ..] | [172, 16..=31, ..] | [192, 168, ..]
+    )
 }
 
 fn build_client() -> Result<reqwest::blocking::Client, String> {
@@ -168,7 +209,7 @@ pub fn fetch_api_list() -> Result<Value, String> {
     let val: Value = serde_json::from_str(&body)
         .map_err(|e| format!("[RUPIA-NET003] API list is not valid JSON: {e}"))?;
     std::fs::create_dir_all(&dir).ok();
-    std::fs::write(&cache_path, &body).ok();
+    atomic_write(&cache_path, &body);
     Ok(val)
 }
 
@@ -245,7 +286,7 @@ pub fn fetch_spec(url: &str, name: &str) -> Result<Value, String> {
     let val: Value = serde_json::from_str(&body)
         .map_err(|e| format!("[RUPIA-NET003] spec '{name}' is not valid JSON: {e}"))?;
     std::fs::create_dir_all(&dir).ok();
-    std::fs::write(&cache_path, &body).ok();
+    atomic_write(&cache_path, &body);
     Ok(val)
 }
 
@@ -437,6 +478,37 @@ mod tests {
     fn ssrf_blocks_invalid_scheme() {
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("ftp://internal/data").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_encoded_ips() {
+        assert!(validate_url("http://0x7f000001/secret").is_err());
+        assert!(validate_url("http://0177.0.0.1/secret").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6() {
+        assert!(validate_url("http://[::1]/secret").is_err());
+        assert!(validate_url("http://[::ffff:127.0.0.1]/secret").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_zero_ip() {
+        assert!(validate_url("http://0.0.0.0/secret").is_err());
+    }
+
+    #[test]
+    fn ssrf_private_172_correct_range() {
+        assert!(validate_url("http://172.16.0.1/x").is_err());
+        assert!(validate_url("http://172.31.255.1/x").is_err());
+        assert!(validate_url("http://172.32.0.1/x").is_ok());
+        assert!(validate_url("http://172.15.0.1/x").is_ok());
+    }
+
+    #[test]
+    fn ssrf_allows_normal_domains() {
+        assert!(validate_url("https://stripe.com/v1/charges").is_ok());
+        assert!(validate_url("https://api.github.com/repos").is_ok());
     }
 
     #[test]
