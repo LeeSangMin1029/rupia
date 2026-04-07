@@ -139,7 +139,10 @@ pub fn diagnose_validation_failure(failure: &ValidationFailure) -> Vec<Diagnosti
         diags.push(Diagnostic {
             severity: Severity::Warning,
             code: "RUPIA-V100",
-            message: format!("{} validation errors — consider simplifying the schema", failure.errors.len()),
+            message: format!(
+                "{} validation errors — consider simplifying the schema",
+                failure.errors.len()
+            ),
             help: "Many errors suggest the LLM fundamentally misunderstood the schema.\n\
                    Try: (1) Split into smaller schemas, (2) Add examples in the prompt,\n\
                    (3) Use a stronger model for the first attempt."
@@ -150,7 +153,10 @@ pub fn diagnose_validation_failure(failure: &ValidationFailure) -> Vec<Diagnosti
     diags
 }
 
-#[expect(clippy::too_many_lines, reason = "dispatch table, splitting would reduce readability")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "dispatch table, splitting would reduce readability"
+)]
 fn categorize_validation_error(e: &ValidationError) -> Diagnostic {
     if e.expected.contains("Format<") {
         let format = e
@@ -205,7 +211,10 @@ fn categorize_validation_error(e: &ValidationError) -> Diagnostic {
             context: None,
         };
     }
-    if e.description.as_ref().is_some_and(|d| d.contains("undefined")) {
+    if e.description
+        .as_ref()
+        .is_some_and(|d| d.contains("undefined"))
+    {
         return Diagnostic {
             severity: Severity::Error,
             code: "RUPIA-V004",
@@ -231,7 +240,10 @@ fn categorize_validation_error(e: &ValidationError) -> Diagnostic {
         return Diagnostic {
             severity: Severity::Error,
             code: "RUPIA-V005",
-            message: format!("{}: type mismatch (got {actual_type}, expected {})", e.path, e.expected),
+            message: format!(
+                "{}: type mismatch (got {actual_type}, expected {})",
+                e.path, e.expected
+            ),
             help: format!(
                 "The LLM returned {actual_type} but the schema expects {}.\n\
                  This should have been auto-coerced. If it persists:\n\
@@ -292,6 +304,12 @@ pub fn diagnose_schema_file(schema_path: &str) -> Vec<Diagnostic> {
             return diags;
         }
     };
+    diags.extend(diagnose_schema_value(&schema));
+    diags
+}
+
+pub fn diagnose_schema_value(schema: &serde_json::Value) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
     if schema.get("type").is_none()
         && schema.get("anyOf").is_none()
         && schema.get("oneOf").is_none()

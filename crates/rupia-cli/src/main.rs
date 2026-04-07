@@ -550,8 +550,15 @@ fn cmd_boundary_gen(schema_path: &PathBuf) -> Result<()> {
 
 fn cmd_lint_schema(schema_path: &std::path::Path, verify_counterexamples: bool) -> Result<()> {
     let path_str = schema_path.to_string_lossy();
-    let mut diags = guard::check_schema_file(&path_str);
     let loaded = load_schema_full(&schema_path.to_path_buf())?;
+    let mut diags = if loaded.relations.is_empty()
+        && loaded.rules.is_empty()
+        && loaded.counterexamples.is_empty()
+    {
+        guard::check_schema_file(&path_str)
+    } else {
+        rupia_core::diagnostic::diagnose_schema_value(&loaded.schema)
+    };
     if verify_counterexamples || !loaded.counterexamples.is_empty() {
         let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
         for w in &ce_warnings {
