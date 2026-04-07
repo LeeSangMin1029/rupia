@@ -99,6 +99,16 @@ impl MmapStaticModel {
         let weights = load_optional_f32_tensor(&safet, "weights");
         let token_mapping = load_optional_mapping(&safet);
         let data_bytes = tensor.data();
+        let expected_bytes = rows
+            .checked_mul(cols)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| EmbedError::ModelInit("tensor dimensions overflow".into()))?;
+        if data_bytes.len() < expected_bytes {
+            return Err(EmbedError::ModelInit(format!(
+                "tensor data too small: {} bytes < {expected_bytes} expected for {rows}x{cols} f32",
+                data_bytes.len()
+            )));
+        }
         let data_offset = data_bytes.as_ptr() as usize - mmap.as_ptr() as usize;
         let (mmap_f32, owned_f32) = match dtype {
             safetensors::Dtype::F32 => {
