@@ -1,110 +1,53 @@
 # rupia
 
-Rust LLM output validation harness. Typia's "type → schema → validate → feedback → self-heal" pattern, in Rust.
+LLM 출력 검증 하네스. AI가 뭘 뱉든 고치고, 검증하고, 틀리면 AI가 스스로 고치게 만드는 도구.
 
-LLMs produce broken JSON. Wrong types, missing fields, markdown wrappers, trailing commas.
-rupia fixes what it can, validates the rest, and generates precise feedback so the LLM corrects itself.
-
-**6.75% → 100% convergence** — the same pattern that makes Typia work for TypeScript.
-
-## Complete Feature Table
-
-### Core Pipeline
-
-| Feature | Module | What It Does |
-|---------|--------|-------------|
-| Lenient Parse | `lenient` | Markdown block extraction, junk prefix skip, trailing comma, JS comments, unquoted keys, incomplete keywords (`tru`→`true`), unclosed brackets, unicode surrogate pairs |
-| Coerce (10 types) | `coerce` | `"42"`→`42`, `"true"`→`true`, enum case insensitive, single→array wrap, default fill, string trim, number separators (`"1,000"`→`1000`), `"1.5k"`→`1500`, indexed object→array, enum number/string cross-convert |
-| Validate | `validator` | JSON Schema: type, range (min/max/exclusive), format (22 types), enum, required, oneOf/anyOf, x-discriminator, uniqueItems |
-| Feedback | `feedback` | `// ❌ [{"path":"$input.age","expected":"number & Minimum<0>"}]` inline annotations, missing property detection, array element placeholders |
-| Guard | `guard` | Production pipeline: size limit, timeout, verbose, diagnostics (RUPIA error codes), self-healing loop |
-
-### Format Validators (22 types, Typia regex 1:1)
-
-| Format | Format | Format | Format |
-|--------|--------|--------|--------|
-| email | idn-email | uri | url |
-| uri-reference | uri-template | iri | iri-reference |
-| uuid | date-time | date | time |
-| duration | ipv4 | ipv6 | hostname |
-| idn-hostname | json-pointer | relative-json-pointer | byte (base64) |
-| regex | password | | |
-
-### LLM Function Calling
-
-| Feature | What It Does |
-|---------|-------------|
-| `LlmFunction` | Schema + parse + validate + `to_openai_tool()` + `to_claude_tool()` |
-| `LlmApplication` | Function collection + `find()` + `to_openai_tools()` / `to_claude_tools()` |
-| `LlmController<T>` | Instance + dispatch + `execute()` / `execute_raw()` with auto coerce + validate |
-
-### AVE (Adaptive Validation Engine)
-
-| Phase | Feature | What It Does |
-|-------|---------|-------------|
-| 0 | Schema Resolution | Domain description → schema + relations + counterexamples (1 LLM call). 3-level summary (Haiku/Sonnet/Opus) |
-| 2-3 | Confidence Validation | Coerce + validate + per-field confidence score (deterministic, no LLM) |
-| 4 | Selective Retry | Failed fields only → LLM retry → merge into original → re-validate. Field group detection from relations |
-| 5 | Schema Evolution | Trace analysis → auto proposals. 3-tier approval: Auto (description), Async (enum add), Sync (type change). Direction-limited: no loosening |
-
-### Schema Operations
-
-| Feature | What It Does |
-|---------|-------------|
-| `inject_constraints_to_description` | Inject min/max/format/enum into description for LLM awareness |
-| `diff_schemas` | Compare old/new schemas, detect added/removed/changed fields, `is_compatible()` |
-| `make_partial` | Remove required (PATCH scenarios) |
-| `infer_schema` | Auto-infer schema from sample JSON values |
-| `compress_feedback` | Deduplicate repeated errors, reduce tokens |
-| `openapi_to_llm_tools` | OpenAPI paths → LLM function calling tools |
-| `ValidationStats` | Track field error frequencies, `prompt_hints()` for improvement suggestions |
-
-### Diagnostics
-
-| Code | Category | Example |
-|------|----------|---------|
-| RUPIA-P001~P006 | Parse | Empty input, no JSON, size limit, malformed, depth exceeded |
-| RUPIA-V001~V005 | Validation | Format violation, range, enum, required, type mismatch |
-| RUPIA-G001~G003 | Guard | Size limit, timeout, convergence failure |
-| RUPIA-S001~S004 | Schema | File not found, invalid JSON, missing type, no required |
-| AVE-E001~E007 | AVE | No domain, schema gen fail, retry exhausted, relation violation, merge cascade, stall, schema corrupt |
-
-### Other
-
-| Feature | What It Does |
-|---------|-------------|
-| `random::generate` | Schema-aware random data generation (respects format/min/max/enum) |
-| `#[derive(Harness)]` | Proc macro: Rust struct → JSON Schema via schemars |
-| `sanitize_feedback` | Prompt injection pattern filtering |
-| `is_stalled` | Detect 3 consecutive identical errors → early exit |
-| Trace (ring buffer) | Success: stats only. Failure: full context preserved |
-
-### CLI
-
-```bash
-rupia parse                           # Lenient JSON parse
-rupia check --schema X [--strict]     # Full pipeline + diagnostics
-rupia validate --schema X             # Schema validation + coerce
-rupia feedback --schema X             # // ❌ inline feedback
-rupia random --schema X --count N     # Schema-aware random data
-rupia lint-schema --schema X          # Schema quality check
-rupia ave --domain "shopping mall"    # AVE Phase 0: schema generation
-rupia ave --schema X --input Y        # AVE Phase 2-3: confidence validation
-```
-
-## Stats
-
-- **154 tests**, clippy clean
-- **14 modules**, ~6,700 lines (production + test)
-- **0 unsafe**, 0 panic, 0 network access
-- Full pipeline: **3.2µs** (valid), **4.4µs** (malformed)
-
-## Install
+## 설치
 
 ```bash
 cargo install --git https://github.com/LeeSangMin1029/rupia rupia-cli
 ```
 
-## License
+## 사용
 
-MIT
+```bash
+# AI 출력 검증 (가장 많이 사용)
+echo "$AI_OUTPUT" | rupia check --schema schema.json --json
+
+# 도메인에서 스키마 자동 생성
+rupia ave --domain "쇼핑몰 주문 시스템"
+
+# 경계값 테스트 생성
+rupia boundary-gen --schema schema.json
+
+# 랜덤 데이터 생성
+rupia random --schema schema.json --count 10
+
+# 스키마 품질 검사
+rupia lint-schema --schema schema.json
+```
+
+## 기능
+
+| 기능 | 설명 |
+|------|------|
+| 관대한 파싱 | markdown, junk prefix, trailing comma, JS 주석, unquoted key 자동 복구 |
+| 자동 교정 10가지 | `"25"`→`25`, `"Admin"`→`"admin"`, `"tag"`→`["tag"]`, default 채움, trim 등 |
+| JSON Schema 검증 | jsonschema 크레이트 (Draft 4~2020-12 전체 키워드) |
+| 피드백 생성 | `// ❌ [{"path":"$input.age","expected":"Minimum<0>"}]` 인라인 |
+| AVE 파이프라인 | 스키마 자동 생성, confidence 검증, 선택적 재시도, 스키마 진화, 버전 관리 |
+| 경계값 생성 | min/max 경계, enum, format, required — nested/allOf/$ref 지원 |
+| 다중 API 교차 분석 | apis.guru 2,529개 API에서 보편 규칙 추출 |
+| 규칙 일관성 검증 | 순서 모순, 범위 모순, 산술 불가능 감지 |
+| 안티패턴 감지 | required 0, 전부 string, root type 없음 등 8가지 |
+| 느슨화 방지 | required 제거, format 제거, type 다운그레이드 차단 |
+| 태스크 스키마 | 소/중/대 규모별 내장 + 자동 감지 |
+| LLM Function Calling | OpenAI/Claude tools 포맷 자동 생성 |
+
+## 스펙
+
+- **214 tests**, clippy clean
+- **19 modules**, ~8,000 lines
+- **0 unsafe**, 0 panic, 0 network access
+- jsonschema 크레이트 (Draft 4~2020-12)
+- MIT license
