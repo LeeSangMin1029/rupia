@@ -16,3 +16,5 @@ pub mod schema_util;
 pub mod registry;
 pub mod task_schemas;
 pub mod embed;
+pub mod fetch;
+pub mod sync;

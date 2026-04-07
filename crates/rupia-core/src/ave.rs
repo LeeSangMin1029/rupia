@@ -37,8 +37,15 @@ pub enum ModelTier {
 pub struct SchemaPackage {
     pub schema: Value,
     pub relations: Vec<FieldRelation>,
+    pub rules: Vec<JsonLogicRule>,
     pub counterexamples: Vec<Value>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonLogicRule {
+    pub description: String,
+    pub logic: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -247,16 +254,88 @@ pub fn validate_relations(data: &Value, relations: &[FieldRelation]) -> Vec<Rela
     violations
 }
 
+const RULE_EVAL_TIMEOUT_MS: u128 = 50;
+const RULE_MAX_JSON_SIZE: usize = 1_048_576;
+
+#[derive(Debug, Clone)]
+pub struct RuleViolation {
+    pub description: String,
+    pub rule: Value,
+}
+
+pub fn validate_rules(data: &Value, rules: &[JsonLogicRule]) -> Vec<RuleViolation> {
+    if rules.is_empty() {
+        return vec![];
+    }
+    let data_size = serde_json::to_string(data).map(|s| s.len()).unwrap_or(0);
+    if data_size > RULE_MAX_JSON_SIZE {
+        return vec![RuleViolation {
+            description: format!(
+                "data exceeds max size for rule evaluation ({data_size} > {RULE_MAX_JSON_SIZE})"
+            ),
+            rule: Value::Null,
+        }];
+    }
+    let engine = datalogic_rs::DataLogic::new();
+    let mut violations = vec![];
+    for rule in rules {
+        let Ok(compiled) = engine.compile(&rule.logic) else {
+            violations.push(RuleViolation {
+                description: format!("rule compile error: {}", rule.description),
+                rule: rule.logic.clone(),
+            });
+            continue;
+        };
+        let start = std::time::Instant::now();
+        let result = engine.evaluate_owned(&compiled, data.clone());
+        if start.elapsed().as_millis() > RULE_EVAL_TIMEOUT_MS {
+            violations.push(RuleViolation {
+                description: format!("rule evaluation timed out: {}", rule.description),
+                rule: rule.logic.clone(),
+            });
+            continue;
+        }
+        match result {
+            Ok(val) => {
+                let passed = match &val {
+                    Value::Bool(b) => *b,
+                    Value::Null => false,
+                    Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
+                    Value::String(s) => !s.is_empty(),
+                    Value::Array(a) => !a.is_empty(),
+                    Value::Object(_) => true,
+                };
+                if !passed {
+                    violations.push(RuleViolation {
+                        description: rule.description.clone(),
+                        rule: rule.logic.clone(),
+                    });
+                }
+            }
+            Err(_) => {
+                violations.push(RuleViolation {
+                    description: format!("rule evaluation error: {}", rule.description),
+                    rule: rule.logic.clone(),
+                });
+            }
+        }
+    }
+    violations
+}
+
 pub fn generate_schema_prompt(domain: &str) -> String {
     format!(
         r#"You are a schema architect. Given a domain description, generate a COMPLETE validation package in a single JSON response.
 
 Domain: "{domain}"
 
-Return a single JSON object with exactly these 3 keys:
+Return a single JSON object with exactly these 4 keys:
 1. "schema": Full JSON Schema (type, properties, required, enums, formats, min/max, patterns)
-2. "relations": Array of cross-field rules [{{"field_a": "...", "operator": "...", "field_b": "..."}}]
-3. "counterexamples": Array of 3 invalid objects, each with a "violation" field
+2. "relations": Array of simple cross-field rules [{{"field_a": "...", "operator": ">=", "field_b": "..."}}]
+3. "rules": Array of JSONLogic rules for complex constraints [{{"description": "...", "logic": {{JSONLogic expression}}}}]
+   Examples: {{"description": "shipped requires tracking", "logic": {{"if": [{{"==": [{{"var": "status"}}, "shipped"]}}, {{"!!": {{"var": "tracking_number"}}}}, true]}}}}
+   {{"description": "total equals subtotal + tax", "logic": {{"==": [{{"var": "total"}}, {{"+": [{{"var": "subtotal"}}, {{"var": "tax"}}]}}]}}}}
+4. "counterexamples": Array of 3 invalid objects, each with a "violation" field
 
 Return ONLY the JSON. No markdown, no explanation."#
     )
@@ -370,6 +449,23 @@ pub fn parse_schema_package(raw: &str) -> Result<SchemaPackage, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let rules = parsed
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let logic = r.get("logic")?.clone();
+                    let description = r
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("unnamed rule")
+                        .to_string();
+                    Some(JsonLogicRule { description, logic })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let counterexamples = parsed
         .get("counterexamples")
         .and_then(|v| v.as_array())
@@ -378,6 +474,7 @@ pub fn parse_schema_package(raw: &str) -> Result<SchemaPackage, String> {
     Ok(SchemaPackage {
         schema,
         relations,
+        rules,
         counterexamples,
         summary: String::new(),
     })
@@ -2101,5 +2198,141 @@ mod tests {
             .as_str()
             .expect("description should exist");
         assert!(desc.contains("name"));
+    }
+
+    #[test]
+    fn jsonlogic_simple_equality() {
+        let data = json!({"status": "active"});
+        let rules = vec![JsonLogicRule {
+            description: "status must be active".into(),
+            logic: json!({"==": [{"var": "status"}, "active"]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn jsonlogic_simple_equality_fail() {
+        let data = json!({"status": "inactive"});
+        let rules = vec![JsonLogicRule {
+            description: "status must be active".into(),
+            logic: json!({"==": [{"var": "status"}, "active"]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].description, "status must be active");
+    }
+
+    #[test]
+    fn jsonlogic_arithmetic_relation() {
+        let data = json!({"subtotal": 100, "tax": 10, "total": 110});
+        let rules = vec![JsonLogicRule {
+            description: "total must equal subtotal + tax".into(),
+            logic: json!({"==": [{"var": "total"}, {"+": [{"var": "subtotal"}, {"var": "tax"}]}]}),
+        }];
+        assert!(validate_rules(&data, &rules).is_empty());
+    }
+
+    #[test]
+    fn jsonlogic_arithmetic_fail() {
+        let data = json!({"subtotal": 100, "tax": 10, "total": 999});
+        let rules = vec![JsonLogicRule {
+            description: "total must equal subtotal + tax".into(),
+            logic: json!({"==": [{"var": "total"}, {"+": [{"var": "subtotal"}, {"var": "tax"}]}]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn jsonlogic_conditional_required() {
+        let data = json!({"status": "shipped", "tracking_number": "TRK123"});
+        let rules = vec![JsonLogicRule {
+            description: "shipped requires tracking_number".into(),
+            logic: json!({"if": [{"==": [{"var": "status"}, "shipped"]}, {"!!": {"var": "tracking_number"}}, true]}),
+        }];
+        assert!(validate_rules(&data, &rules).is_empty());
+    }
+
+    #[test]
+    fn jsonlogic_conditional_required_fail() {
+        let data = json!({"status": "shipped"});
+        let rules = vec![JsonLogicRule {
+            description: "shipped requires tracking_number".into(),
+            logic: json!({"if": [{"==": [{"var": "status"}, "shipped"]}, {"!!": {"var": "tracking_number"}}, true]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn jsonlogic_conditional_not_triggered() {
+        let data = json!({"status": "pending"});
+        let rules = vec![JsonLogicRule {
+            description: "shipped requires tracking_number".into(),
+            logic: json!({"if": [{"==": [{"var": "status"}, "shipped"]}, {"!!": {"var": "tracking_number"}}, true]}),
+        }];
+        assert!(validate_rules(&data, &rules).is_empty());
+    }
+
+    #[test]
+    fn jsonlogic_empty_rules() {
+        let data = json!({"a": 1});
+        assert!(validate_rules(&data, &[]).is_empty());
+    }
+
+    #[test]
+    fn jsonlogic_oversized_data() {
+        let big = "x".repeat(RULE_MAX_JSON_SIZE + 1);
+        let data = json!({"payload": big});
+        let rules = vec![JsonLogicRule {
+            description: "any".into(),
+            logic: json!({"==": [1, 1]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("exceeds max size"));
+    }
+
+    #[test]
+    fn jsonlogic_invalid_rule() {
+        let data = json!({"a": 1});
+        let rules = vec![JsonLogicRule {
+            description: "bad rule".into(),
+            logic: json!({"nonexistent_op": [1, 2]}),
+        }];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn jsonlogic_multiple_rules_partial_fail() {
+        let data = json!({"age": 25, "status": "inactive"});
+        let rules = vec![
+            JsonLogicRule {
+                description: "age >= 18".into(),
+                logic: json!({">=": [{"var": "age"}, 18]}),
+            },
+            JsonLogicRule {
+                description: "status must be active".into(),
+                logic: json!({"==": [{"var": "status"}, "active"]}),
+            },
+        ];
+        let violations = validate_rules(&data, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].description, "status must be active");
+    }
+
+    #[test]
+    fn parse_package_with_rules() {
+        let raw = r#"{
+            "schema": {"type": "object", "properties": {"total": {"type": "number"}}},
+            "relations": [],
+            "rules": [{"description": "total > 0", "logic": {">": [{"var": "total"}, 0]}}],
+            "counterexamples": []
+        }"#;
+        let pkg = parse_schema_package(raw).unwrap();
+        assert_eq!(pkg.rules.len(), 1);
+        assert_eq!(pkg.rules[0].description, "total > 0");
     }
 }

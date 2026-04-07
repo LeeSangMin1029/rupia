@@ -3,6 +3,9 @@ name = "rupia-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for rupia LLM output validation — parsing, coercion, schema validation, feedback"
 
 [features]
 default = []
@@ -14,12 +17,14 @@ serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
 regex-lite = "0.1"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 jsonschema = "0.28"
 safetensors = { version = "0.5", optional = true }
 memmap2 = { version = "0.9", optional = true }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex", "progressbar", "esaxx_fast", "http"], optional = true }
 half = { version = "2.0", optional = true }
 hf-hub = { version = "0.4", optional = true }
+datalogic-rs = "4.0.19"
 
 [dev-dependencies]
 serde.workspace = true

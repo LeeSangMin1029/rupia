@@ -8,6 +8,7 @@ pub use rupia_core::lenient::parse as lenient_parse;
 pub use rupia_core::llm::{LlmApplication, LlmController, LlmFunction};
 pub use rupia_core::random;
 pub use rupia_core::schema_ops;
+pub use rupia_core::sync;
 pub use rupia_core::types::{
     HarnessConfig, HasSchema, ParseError, ParseResult, Validation, ValidationError,
     ValidationFailure,

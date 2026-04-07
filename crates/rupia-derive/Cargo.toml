@@ -3,6 +3,9 @@ name = "rupia-derive"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derive macros for rupia — #[derive(Harness)] with #[rupia(...)] attributes"
 
 [lib]
 proc-macro = true

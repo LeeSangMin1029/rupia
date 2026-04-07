@@ -3,6 +3,9 @@ name = "rupia"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM output validation harness — lenient parsing, schema coercion, structured feedback for self-healing loops"
 
 [dependencies]
 rupia-core = { path = "../rupia-core" }

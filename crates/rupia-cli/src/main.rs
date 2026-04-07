@@ -90,6 +90,33 @@ enum Command {
         #[arg(short, long)]
         schema: PathBuf,
     },
+    /// Cross-reference schemas across public APIs or local files
+    CrossRef {
+        /// Domain keyword (e.g., "payment", "ecommerce")
+        #[arg(short, long)]
+        domain: Option<String>,
+        /// Local schema files to compare
+        #[arg(short, long, num_args = 1..)]
+        schemas: Vec<PathBuf>,
+        /// Entity name hint (e.g., "order", "payment")
+        #[arg(short, long)]
+        entity: Option<String>,
+        /// Compare result against app schema
+        #[arg(short, long)]
+        compare: Option<PathBuf>,
+        /// Max APIs to analyze
+        #[arg(long, default_value = "5")]
+        max_apis: usize,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+        /// Sync: download all domain APIs locally for offline use
+        #[arg(long)]
+        sync: bool,
+        /// Diff: detect changes since last sync
+        #[arg(long)]
+        diff: bool,
+    },
     /// AVE pipeline: schema-driven validation with confidence scoring
     Ave {
         /// Domain description for schema generation
@@ -127,6 +154,25 @@ fn main() -> ExitCode {
             json,
         } => cmd_check(&schema, input, strict, json, cli.verbose),
         Command::Random { schema, count } => cmd_random(&schema, count),
+        Command::CrossRef {
+            domain,
+            schemas,
+            entity,
+            compare,
+            max_apis,
+            json,
+            sync,
+            diff,
+        } => cmd_cross_ref(&CrossRefArgs {
+            domain,
+            schemas,
+            entity,
+            compare,
+            max_apis,
+            json_output: json,
+            sync,
+            diff,
+        }),
         Command::BoundaryGen { schema } => cmd_boundary_gen(&schema),
         Command::LintSchema {
             schema,
@@ -167,6 +213,7 @@ fn read_input(path: Option<PathBuf>) -> Result<String> {
 struct LoadedSchema {
     schema: serde_json::Value,
     relations: Vec<rupia_core::ave::FieldRelation>,
+    rules: Vec<rupia_core::ave::JsonLogicRule>,
     counterexamples: Vec<serde_json::Value>,
 }
 
@@ -186,6 +233,7 @@ fn load_schema_full(path: &PathBuf) -> Result<LoadedSchema> {
             return Ok(LoadedSchema {
                 schema: pkg.schema,
                 relations: pkg.relations,
+                rules: pkg.rules,
                 counterexamples: pkg.counterexamples,
             });
         }
@@ -193,6 +241,7 @@ fn load_schema_full(path: &PathBuf) -> Result<LoadedSchema> {
     Ok(LoadedSchema {
         schema: root,
         relations: vec![],
+        rules: vec![],
         counterexamples: vec![],
     })
 }
@@ -283,8 +332,10 @@ fn cmd_check(
         Ok(result) => {
             let rel_violations =
                 rupia_core::ave::validate_relations(&result.value, &loaded.relations);
-            if rel_violations.is_empty() {
-                let output = if json_output {
+            let rule_violations = rupia_core::ave::validate_rules(&result.value, &loaded.rules);
+            let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
+            if rel_violations.is_empty() && rule_violations.is_empty() {
+                let mut output = if json_output {
                     serde_json::json!({
                         "status": "valid",
                         "data": result.value,
@@ -296,9 +347,12 @@ fn cmd_check(
                         "data": result.value,
                     })
                 };
+                if !ce_warnings.is_empty() {
+                    output["schema_warnings"] = serde_json::json!(ce_warnings);
+                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                let rel_errors: Vec<serde_json::Value> = rel_violations
+                let mut errors: Vec<serde_json::Value> = rel_violations
                     .iter()
                     .map(|v| {
                         serde_json::json!({
@@ -308,11 +362,18 @@ fn cmd_check(
                         })
                     })
                     .collect();
+                for rv in &rule_violations {
+                    errors.push(serde_json::json!({
+                        "code": "RUPIA-RULE001",
+                        "message": rv.description,
+                        "help": "JSONLogic rule violated",
+                    }));
+                }
                 let output = serde_json::json!({
                     "status": "invalid",
-                    "error_count": rel_violations.len(),
-                    "feedback": "Cross-field relation constraints violated",
-                    "errors": rel_errors,
+                    "error_count": errors.len(),
+                    "feedback": "Cross-field constraints violated",
+                    "errors": errors,
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
@@ -387,6 +448,7 @@ fn cmd_ave(
             ..Default::default()
         };
         let pkg = rupia_core::ave::schema_resolve(&raw, &config).map_err(|e| anyhow::anyhow!(e))?;
+        let ce_warnings = check_counterexamples(&pkg.schema, &pkg.counterexamples);
         let out = serde_json::json!({
             "schema": pkg.schema,
             "relations": pkg.relations.iter().map(|r| serde_json::json!({
@@ -394,8 +456,13 @@ fn cmd_ave(
                 "operator": r.operator,
                 "field_b": r.field_b,
             })).collect::<Vec<_>>(),
+            "rules": pkg.rules.iter().map(|r| serde_json::json!({
+                "description": r.description,
+                "logic": r.logic,
+            })).collect::<Vec<_>>(),
             "summary": pkg.summary,
             "counterexamples_count": pkg.counterexamples.len(),
+            "schema_warnings": ce_warnings,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -490,6 +557,202 @@ fn cmd_lint_schema(schema_path: &std::path::Path, verify_counterexamples: bool) 
         bail!("{errors} schema error(s)")
     }
     Ok(())
+}
+
+struct CrossRefArgs {
+    domain: Option<String>,
+    schemas: Vec<PathBuf>,
+    entity: Option<String>,
+    compare: Option<PathBuf>,
+    max_apis: usize,
+    json_output: bool,
+    sync: bool,
+    diff: bool,
+}
+
+fn cmd_cross_ref(args: &CrossRefArgs) -> Result<()> {
+    if args.sync {
+        let d = args.domain.as_deref().context("--sync requires --domain")?;
+        let manifest =
+            rupia_core::sync::sync_domain(d, args.max_apis).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output = serde_json::json!({
+            "action": "sync",
+            "domain": d,
+            "apis_synced": manifest.apis.len(),
+            "synced_at": manifest.last_sync,
+            "apis": manifest.apis.keys().collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    if args.diff {
+        let d = args.domain.as_deref().context("--diff requires --domain")?;
+        let report = rupia_core::sync::detect_changes(d, args.max_apis)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output = serde_json::to_value(&report)?;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    if args.domain.is_none() && args.schemas.is_empty() {
+        bail!("either --domain or --schemas is required");
+    }
+    let report = build_cross_ref(
+        args.domain.as_deref(),
+        &args.schemas,
+        args.entity.as_deref(),
+        args.max_apis,
+    )?;
+    if let Some(ref cmp_path) = args.compare {
+        return print_compare(
+            &report,
+            cmp_path,
+            args.domain.as_deref(),
+            &args.schemas,
+            args.max_apis,
+        );
+    }
+    print_cross_ref(&report, args.domain.as_deref(), args.json_output);
+    Ok(())
+}
+
+struct CrossRefData {
+    enums: Vec<rupia_core::schema_ops::UniversalEnum>,
+    constraints: Vec<rupia_core::schema_ops::UniversalConstraint>,
+    divergences: Vec<rupia_core::schema_ops::Divergence>,
+    apis_analyzed: Vec<String>,
+    schemas_found: usize,
+}
+
+fn build_cross_ref(
+    domain: Option<&str>,
+    schemas: &[PathBuf],
+    entity: Option<&str>,
+    max_apis: usize,
+) -> Result<CrossRefData> {
+    if let Some(d) = domain {
+        let report = rupia_core::fetch::cross_ref_by_domain(d, entity, max_apis)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(CrossRefData {
+            enums: report.universal_enums,
+            constraints: report.universal_constraints,
+            divergences: report.divergences,
+            apis_analyzed: report.apis_analyzed,
+            schemas_found: report.schemas_found,
+        })
+    } else {
+        let mut loaded: Vec<serde_json::Value> = Vec::new();
+        for p in schemas {
+            loaded.push(load_schema(p)?);
+        }
+        let result = rupia_core::schema_ops::cross_reference_schemas(&loaded);
+        Ok(CrossRefData {
+            enums: result.universal_enums,
+            constraints: result.universal_constraints,
+            divergences: result.divergences,
+            apis_analyzed: schemas.iter().map(|p| p.display().to_string()).collect(),
+            schemas_found: loaded.len(),
+        })
+    }
+}
+
+fn print_compare(
+    _report: &CrossRefData,
+    cmp_path: &PathBuf,
+    domain: Option<&str>,
+    schemas: &[PathBuf],
+    max_apis: usize,
+) -> Result<()> {
+    let app_schema = load_schema(cmp_path)?;
+    let mut all = vec![app_schema];
+    if let Some(d) = domain {
+        let list = rupia_core::fetch::fetch_api_list().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let apis = rupia_core::fetch::search_apis(&list, d, max_apis);
+        for api in &apis {
+            if api.openapi_url.is_empty() {
+                continue;
+            }
+            if let Ok(spec) = rupia_core::fetch::fetch_spec(&api.openapi_url, &api.name) {
+                all.push(spec);
+            }
+        }
+    }
+    for p in schemas {
+        all.push(load_schema(p)?);
+    }
+    let cmp_result = rupia_core::schema_ops::cross_reference_schemas(&all);
+    let output = serde_json::json!({
+        "compare_source": cmp_path.display().to_string(),
+        "divergences": cmp_result.divergences.iter().map(|d| serde_json::json!({
+            "field": d.field_pattern,
+            "description": d.description,
+        })).collect::<Vec<_>>(),
+    });
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn print_cross_ref(data: &CrossRefData, domain: Option<&str>, json_output: bool) {
+    if json_output {
+        let output = serde_json::json!({
+            "domain": domain,
+            "apis_analyzed": data.apis_analyzed,
+            "schemas_found": data.schemas_found,
+            "universal_enums": data.enums.iter().map(|e| serde_json::json!({
+                "field": e.field_pattern,
+                "common_values": e.common_values,
+                "all_values": e.all_values,
+                "source_count": e.source_count,
+            })).collect::<Vec<_>>(),
+            "universal_constraints": data.constraints.iter().map(|c| serde_json::json!({
+                "field": c.field_pattern,
+                "constraint_type": c.constraint_type,
+                "value": c.value,
+                "agreement": format!("{}/{}", c.agreement, c.total),
+            })).collect::<Vec<_>>(),
+            "divergences": data.divergences.iter().map(|d| serde_json::json!({
+                "field": d.field_pattern,
+                "description": d.description,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        println!("=== Cross-Reference Report ===");
+        if let Some(d) = domain {
+            println!("Domain: {d}");
+        }
+        println!(
+            "APIs analyzed: {} | Schemas found: {}",
+            data.apis_analyzed.len(),
+            data.schemas_found
+        );
+        for a in &data.apis_analyzed {
+            println!("  - {a}");
+        }
+        if !data.enums.is_empty() {
+            println!("\n--- Universal Enums ---");
+            for e in &data.enums {
+                println!(
+                    "  {}: {:?} (from {} sources)",
+                    e.field_pattern, e.common_values, e.source_count
+                );
+            }
+        }
+        if !data.constraints.is_empty() {
+            println!("\n--- Universal Constraints ---");
+            for c in &data.constraints {
+                println!(
+                    "  {} [{}]: {} ({}/{})",
+                    c.field_pattern, c.constraint_type, c.value, c.agreement, c.total
+                );
+            }
+        }
+        if !data.divergences.is_empty() {
+            println!("\n--- Divergences ---");
+            for d in &data.divergences {
+                println!("  {}: {}", d.field_pattern, d.description);
+            }
+        }
+    }
 }
 
 fn check_counterexamples(

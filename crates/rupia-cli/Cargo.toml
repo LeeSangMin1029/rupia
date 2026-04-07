@@ -3,6 +3,9 @@ name = "rupia-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for rupia LLM output validation harness"
 
 [[bin]]
 name = "rupia"
