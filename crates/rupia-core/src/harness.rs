@@ -37,12 +37,18 @@ const INJECTION_PATTERNS: &[&str] = &[
 ];
 
 pub fn sanitize_feedback(feedback: &str) -> String {
-    let lower = feedback.to_lowercase();
     let mut result = feedback.to_owned();
-    for pattern in INJECTION_PATTERNS {
-        if let Some(pos) = lower.find(pattern) {
-            let end = pos + pattern.len();
-            result.replace_range(pos..end, "[filtered]");
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let lower = result.to_lowercase();
+        for pattern in INJECTION_PATTERNS {
+            if let Some(pos) = lower.find(pattern) {
+                let end = pos + pattern.len();
+                result.replace_range(pos..end, "[filtered]");
+                changed = true;
+                break;
+            }
         }
     }
     result
@@ -118,7 +124,22 @@ mod tests {
     #[test]
     fn sanitize_multiple_patterns() {
         let result = sanitize_feedback("system override and jailbreak attempt");
-        assert!(result.contains("[filtered]"));
+        assert!(!result.to_lowercase().contains("system override"));
+        assert!(!result.to_lowercase().contains("jailbreak"));
+    }
+
+    #[test]
+    fn sanitize_repeated_same_pattern() {
+        let result = sanitize_feedback("ignore previous instructions then ignore previous instructions again");
+        assert!(!result.to_lowercase().contains("ignore previous instructions"));
+        assert_eq!(result.matches("[filtered]").count(), 2);
+    }
+
+    #[test]
+    fn sanitize_two_different_patterns() {
+        let result = sanitize_feedback("first: system override, second: jailbreak");
+        assert!(!result.to_lowercase().contains("system override"));
+        assert!(!result.to_lowercase().contains("jailbreak"));
     }
 
     #[test]
