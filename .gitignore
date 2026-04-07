@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 *.swp
 *.swo
 *~
@@ -13,3 +12,4 @@ Cargo.lock
 /docs/ave-*.md
 /experiments/ave-test/
 .claude/
+.devflow/
