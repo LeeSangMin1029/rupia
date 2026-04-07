@@ -267,60 +267,99 @@ pub fn validate_rules(data: &Value, rules: &[JsonLogicRule]) -> Vec<RuleViolatio
     if rules.is_empty() {
         return vec![];
     }
-    let data_size = serde_json::to_string(data).map(|s| s.len()).unwrap_or(0);
-    if data_size > RULE_MAX_JSON_SIZE {
-        return vec![RuleViolation {
-            description: format!(
-                "data exceeds max size for rule evaluation ({data_size} > {RULE_MAX_JSON_SIZE})"
-            ),
-            rule: Value::Null,
-        }];
+    RuleEngine::new(rules).evaluate(data)
+}
+
+pub struct RuleEngine {
+    engine: datalogic_rs::DataLogic,
+    compiled: Vec<(String, std::sync::Arc<datalogic_rs::CompiledLogic>, Value)>,
+}
+
+impl RuleEngine {
+    pub fn new(rules: &[JsonLogicRule]) -> Self {
+        let engine = datalogic_rs::DataLogic::new();
+        let compiled = rules
+            .iter()
+            .filter_map(|r| {
+                engine
+                    .compile(&r.logic)
+                    .ok()
+                    .map(|c| (r.description.clone(), c, r.logic.clone()))
+            })
+            .collect();
+        Self { engine, compiled }
     }
-    let engine = datalogic_rs::DataLogic::new();
-    let mut violations = vec![];
-    for rule in rules {
-        let Ok(compiled) = engine.compile(&rule.logic) else {
-            violations.push(RuleViolation {
-                description: format!("rule compile error: {}", rule.description),
-                rule: rule.logic.clone(),
-            });
-            continue;
-        };
-        let start = std::time::Instant::now();
-        let result = engine.evaluate_owned(&compiled, data.clone());
-        if start.elapsed().as_millis() > RULE_EVAL_TIMEOUT_MS {
-            violations.push(RuleViolation {
-                description: format!("rule evaluation timed out: {}", rule.description),
-                rule: rule.logic.clone(),
-            });
-            continue;
+
+    pub fn evaluate(&self, data: &Value) -> Vec<RuleViolation> {
+        let data_size = serde_json::to_string(data).map(|s| s.len()).unwrap_or(0);
+        if data_size > RULE_MAX_JSON_SIZE {
+            return vec![RuleViolation {
+                description: format!(
+                    "data exceeds max size for rule evaluation ({data_size} > {RULE_MAX_JSON_SIZE})"
+                ),
+                rule: Value::Null,
+            }];
         }
-        match result {
-            Ok(val) => {
-                let passed = match &val {
-                    Value::Bool(b) => *b,
-                    Value::Null => false,
-                    Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
-                    Value::String(s) => !s.is_empty(),
-                    Value::Array(a) => !a.is_empty(),
-                    Value::Object(_) => true,
-                };
-                if !passed {
+        let mut violations = vec![];
+        for (desc, compiled, logic) in &self.compiled {
+            let start = std::time::Instant::now();
+            let result = self.engine.evaluate_owned(compiled, data.clone());
+            if start.elapsed().as_millis() > RULE_EVAL_TIMEOUT_MS {
+                violations.push(RuleViolation {
+                    description: format!("rule evaluation timed out: {desc}"),
+                    rule: logic.clone(),
+                });
+                continue;
+            }
+            match result {
+                Ok(val) => {
+                    if !is_truthy(&val) {
+                        violations.push(RuleViolation {
+                            description: desc.clone(),
+                            rule: logic.clone(),
+                        });
+                    }
+                }
+                Err(_) => {
                     violations.push(RuleViolation {
-                        description: rule.description.clone(),
-                        rule: rule.logic.clone(),
+                        description: format!("rule evaluation error: {desc}"),
+                        rule: logic.clone(),
                     });
                 }
             }
-            Err(_) => {
-                violations.push(RuleViolation {
-                    description: format!("rule evaluation error: {}", rule.description),
-                    rule: rule.logic.clone(),
-                });
-            }
         }
+        violations
     }
-    violations
+
+    pub fn evaluate_batch(&self, items: &[Value]) -> Vec<(usize, Vec<RuleViolation>)> {
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, data)| {
+                let v = self.evaluate(data);
+                if v.is_empty() {
+                    None
+                } else {
+                    Some((i, v))
+                }
+            })
+            .collect()
+    }
+
+    pub fn rule_count(&self) -> usize {
+        self.compiled.len()
+    }
+}
+
+fn is_truthy(val: &Value) -> bool {
+    match val {
+        Value::Bool(b) => *b,
+        Value::Null => false,
+        Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(_) => true,
+    }
 }
 
 pub fn generate_schema_prompt(domain: &str) -> String {
@@ -2334,5 +2373,65 @@ mod tests {
         let pkg = parse_schema_package(raw).unwrap();
         assert_eq!(pkg.rules.len(), 1);
         assert_eq!(pkg.rules[0].description, "total > 0");
+    }
+
+    #[test]
+    fn rule_engine_precompile_and_reuse() {
+        let rules = vec![
+            JsonLogicRule {
+                description: "age >= 18".into(),
+                logic: json!({">=": [{"var": "age"}, 18]}),
+            },
+            JsonLogicRule {
+                description: "status active".into(),
+                logic: json!({"==": [{"var": "status"}, "active"]}),
+            },
+        ];
+        let engine = RuleEngine::new(&rules);
+        assert_eq!(engine.rule_count(), 2);
+        assert!(engine
+            .evaluate(&json!({"age": 25, "status": "active"}))
+            .is_empty());
+        assert_eq!(
+            engine
+                .evaluate(&json!({"age": 10, "status": "active"}))
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .evaluate(&json!({"age": 10, "status": "inactive"}))
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn rule_engine_batch() {
+        let rules = vec![JsonLogicRule {
+            description: "positive".into(),
+            logic: json!({">": [{"var": "val"}, 0]}),
+        }];
+        let engine = RuleEngine::new(&rules);
+        let items = vec![json!({"val": 5}), json!({"val": -1}), json!({"val": 10})];
+        let failures = engine.evaluate_batch(&items);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, 1);
+    }
+
+    #[test]
+    fn rule_engine_skips_invalid_rules() {
+        let rules = vec![
+            JsonLogicRule {
+                description: "valid".into(),
+                logic: json!({"==": [1, 1]}),
+            },
+            JsonLogicRule {
+                description: "bad op".into(),
+                logic: json!({"nonexistent_op_xyz": [1]}),
+            },
+        ];
+        let engine = RuleEngine::new(&rules);
+        assert!(engine.rule_count() <= 2);
     }
 }
