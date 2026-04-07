@@ -117,6 +117,21 @@ enum Command {
         #[arg(long)]
         diff: bool,
     },
+    /// Watch multiple domains for API changes (sync + diff)
+    Watch {
+        /// Config file (.rupia-watch.json)
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Domains to watch (alternative to config file)
+        #[arg(short, long, num_args = 1..)]
+        domains: Vec<String>,
+        /// Max APIs per domain
+        #[arg(long, default_value = "5")]
+        max_apis: usize,
+        /// Sync before diff (first run)
+        #[arg(long)]
+        sync_first: bool,
+    },
     /// AVE pipeline: schema-driven validation with confidence scoring
     Ave {
         /// Domain description for schema generation
@@ -173,6 +188,12 @@ fn main() -> ExitCode {
             sync,
             diff,
         }),
+        Command::Watch {
+            config,
+            domains,
+            max_apis,
+            sync_first,
+        } => cmd_watch(config.as_ref(), &domains, max_apis, sync_first),
         Command::BoundaryGen { schema } => cmd_boundary_gen(&schema),
         Command::LintSchema {
             schema,
@@ -773,4 +794,110 @@ fn check_counterexamples(
         }
     }
     warnings
+}
+
+fn parse_watch_config(path: &std::path::Path) -> Result<(Vec<String>, usize)> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading watch config {}", path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&content).context("parsing watch config")?;
+    let domains = val
+        .get("domains")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let max_apis = val
+        .get("max_apis")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(5, |v| usize::try_from(v).unwrap_or(5));
+    Ok((domains, max_apis))
+}
+
+fn cmd_watch(
+    config_path: Option<&PathBuf>,
+    cli_domains: &[String],
+    max_apis: usize,
+    sync_first: bool,
+) -> Result<()> {
+    let (domains, resolved_max) = if let Some(path) = config_path {
+        parse_watch_config(path)?
+    } else if !cli_domains.is_empty() {
+        (cli_domains.to_vec(), max_apis)
+    } else {
+        bail!("either --config or --domains is required");
+    };
+    if domains.is_empty() {
+        bail!("no domains to watch");
+    }
+    let mut results = Vec::new();
+    let mut total_breaking = 0usize;
+    for domain in &domains {
+        if sync_first {
+            match rupia_core::sync::sync_domain(domain, resolved_max) {
+                Ok(m) => {
+                    eprintln!("[sync] {domain} — {} APIs synced", m.apis.len());
+                }
+                Err(e) => {
+                    eprintln!("[sync] {domain} — error: {e}");
+                    results.push(serde_json::json!({
+                        "domain": domain,
+                        "status": "sync_error",
+                        "error": e,
+                    }));
+                    continue;
+                }
+            }
+        }
+        match rupia_core::sync::detect_changes(domain, resolved_max) {
+            Ok(report) => {
+                let breaking = report.summary.breaking_changes;
+                total_breaking += breaking;
+                results.push(serde_json::json!({
+                    "domain": domain,
+                    "status": "ok",
+                    "total_apis": report.summary.total_apis,
+                    "new_apis": report.summary.new_apis,
+                    "updated_apis": report.summary.updated_apis,
+                    "removed_apis": report.summary.removed_apis,
+                    "breaking_changes": breaking,
+                    "changes": report.changes.iter().filter(|c| {
+                        !matches!(c.change_type, rupia_core::sync::ChangeType::Unchanged)
+                    }).map(|c| serde_json::json!({
+                        "api": c.api_name,
+                        "type": format!("{:?}", c.change_type),
+                    })).collect::<Vec<_>>(),
+                }));
+            }
+            Err(e) => {
+                if e.contains("no previous sync") {
+                    eprintln!("[watch] {domain} — no sync yet, run with --sync-first");
+                    results.push(serde_json::json!({
+                        "domain": domain,
+                        "status": "no_sync",
+                        "hint": "run with --sync-first",
+                    }));
+                } else {
+                    eprintln!("[watch] {domain} — error: {e}");
+                    results.push(serde_json::json!({
+                        "domain": domain,
+                        "status": "error",
+                        "error": e,
+                    }));
+                }
+            }
+        }
+    }
+    let output = serde_json::json!({
+        "domains_checked": domains.len(),
+        "total_breaking": total_breaking,
+        "results": results,
+    });
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    if total_breaking > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
