@@ -1,5 +1,5 @@
 use crate::schema_util;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct BoundaryCase {
     pub field: String,
@@ -346,9 +346,11 @@ mod tests {
         let status_cases: Vec<_> = cases.iter().filter(|c| c.field == "status").collect();
         assert!(status_cases.iter().any(|c| c.value == json!("active")));
         assert!(status_cases.iter().any(|c| c.value == json!("inactive")));
-        assert!(status_cases
-            .iter()
-            .any(|c| c.value == json!("__invalid_enum_value__")));
+        assert!(
+            status_cases
+                .iter()
+                .any(|c| c.value == json!("__invalid_enum_value__"))
+        );
     }
 
     #[test]
@@ -362,12 +364,16 @@ mod tests {
         });
         let cases = generate_boundary_cases(&schema);
         let name_cases: Vec<_> = cases.iter().filter(|c| c.field == "name").collect();
-        assert!(name_cases
-            .iter()
-            .any(|c| c.value.is_null() && c.expected_valid == Some(false)));
-        assert!(name_cases
-            .iter()
-            .any(|c| c.description.contains("present") && c.expected_valid == Some(true)));
+        assert!(
+            name_cases
+                .iter()
+                .any(|c| c.value.is_null() && c.expected_valid == Some(false))
+        );
+        assert!(
+            name_cases
+                .iter()
+                .any(|c| c.description.contains("present") && c.expected_valid == Some(true))
+        );
     }
 
     #[test]
@@ -380,15 +386,21 @@ mod tests {
         }];
         let cases = generate_relation_boundaries(&schema, &rels);
         assert_eq!(cases.len(), 3);
-        assert!(cases
-            .iter()
-            .any(|c| c.description.contains("boundary") && c.expected_valid == Some(true)));
-        assert!(cases
-            .iter()
-            .any(|c| c.description.contains("violation") && c.expected_valid == Some(false)));
-        assert!(cases
-            .iter()
-            .any(|c| c.description.contains("safe") && c.expected_valid == Some(true)));
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.description.contains("boundary") && c.expected_valid == Some(true))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.description.contains("violation") && c.expected_valid == Some(false))
+        );
+        assert!(
+            cases
+                .iter()
+                .any(|c| c.description.contains("safe") && c.expected_valid == Some(true))
+        );
     }
 
     #[test]

@@ -337,11 +337,7 @@ impl RuleEngine {
             .enumerate()
             .filter_map(|(i, data)| {
                 let v = self.evaluate(data);
-                if v.is_empty() {
-                    None
-                } else {
-                    Some((i, v))
-                }
+                if v.is_empty() { None } else { Some((i, v)) }
             })
             .collect()
     }
@@ -1824,9 +1820,11 @@ mod tests {
         let data = json!({"name": "Alice", "age": 30});
         let results = validate_with_confidence(&data, &schema, &[]);
         assert!(results.iter().all(|r| r.status == FieldStatus::Valid));
-        assert!(results
-            .iter()
-            .all(|r| (r.confidence - 1.0).abs() < f64::EPSILON));
+        assert!(
+            results
+                .iter()
+                .all(|r| (r.confidence - 1.0).abs() < f64::EPSILON)
+        );
     }
 
     #[test]
@@ -2079,10 +2077,12 @@ mod tests {
             stalled: false,
         };
         let proposals = propose_evolution(&schema, &analysis, 10);
-        assert!(proposals
-            .iter()
-            .any(|p| p.change_type == ChangeType::DescriptionEnrich
-                && p.approval == ApprovalLevel::Auto));
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.change_type == ChangeType::DescriptionEnrich
+                    && p.approval == ApprovalLevel::Auto)
+        );
     }
 
     #[test]
@@ -2100,9 +2100,12 @@ mod tests {
             stalled: false,
         };
         let proposals = propose_evolution(&schema, &analysis, 10);
-        assert!(proposals
-            .iter()
-            .any(|p| p.change_type == ChangeType::TypeChange && p.approval == ApprovalLevel::Sync));
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.change_type == ChangeType::TypeChange
+                    && p.approval == ApprovalLevel::Sync)
+        );
     }
 
     #[test]
@@ -2389,9 +2392,11 @@ mod tests {
         ];
         let engine = RuleEngine::new(&rules);
         assert_eq!(engine.rule_count(), 2);
-        assert!(engine
-            .evaluate(&json!({"age": 25, "status": "active"}))
-            .is_empty());
+        assert!(
+            engine
+                .evaluate(&json!({"age": 25, "status": "active"}))
+                .is_empty()
+        );
         assert_eq!(
             engine
                 .evaluate(&json!({"age": 10, "status": "active"}))

@@ -309,18 +309,15 @@ mod tests {
 
     #[tokio::test]
     async fn guarded_loop_exhausted() {
-        let schema = json!({"type": "object", "properties": {"x": {"type": "number", "minimum": 999}}});
+        let schema =
+            json!({"type": "object", "properties": {"x": {"type": "number", "minimum": 999}}});
         let config = Config {
             max_retries: 1,
             ..Default::default()
         };
-        let err = guarded_loop(
-            &schema,
-            |_| async { r#"{"x": 1}"#.to_owned() },
-            &config,
-        )
-        .await
-        .unwrap_err();
+        let err = guarded_loop(&schema, |_| async { r#"{"x": 1}"#.to_owned() }, &config)
+            .await
+            .unwrap_err();
         assert!(err.attempts >= 2);
     }
 }

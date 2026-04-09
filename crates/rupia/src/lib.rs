@@ -3,7 +3,7 @@ pub use rupia_core::diagnostic::{self, Diagnostic, Severity};
 pub use rupia_core::feedback::stringify as feedback_stringify;
 pub use rupia_core::format;
 pub use rupia_core::guard::{self, Config as GuardConfig, GuardError, GuardResult};
-pub use rupia_core::harness::{self, run as harness_loop, HarnessResult};
+pub use rupia_core::harness::{self, HarnessResult, run as harness_loop};
 pub use rupia_core::lenient::parse as lenient_parse;
 pub use rupia_core::llm::{LlmApplication, LlmController, LlmFunction};
 pub use rupia_core::random;

@@ -389,12 +389,16 @@ mod tests {
         let diff = diff_spec(&old, &new);
         assert_eq!(diff.schemas_changed.len(), 1);
         assert_eq!(diff.schemas_changed[0].schema_name, "Order");
-        assert!(diff.schemas_changed[0]
-            .removed_fields
-            .contains(&"status".to_string()));
-        assert!(diff.schemas_changed[0]
-            .added_fields
-            .contains(&"state".to_string()));
+        assert!(
+            diff.schemas_changed[0]
+                .removed_fields
+                .contains(&"status".to_string())
+        );
+        assert!(
+            diff.schemas_changed[0]
+                .added_fields
+                .contains(&"state".to_string())
+        );
         assert!(diff.schemas_changed[0].breaking);
     }
 

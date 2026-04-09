@@ -527,11 +527,13 @@ mod tests {
             "else":{}
         });
         assert!(!validate(&json!({"status":"shipped"}), &schema).is_success());
-        assert!(validate(
-            &json!({"status":"shipped","tracking_number":"123"}),
-            &schema
-        )
-        .is_success());
+        assert!(
+            validate(
+                &json!({"status":"shipped","tracking_number":"123"}),
+                &schema
+            )
+            .is_success()
+        );
         assert!(validate(&json!({"status":"pending"}), &schema).is_success());
     }
 

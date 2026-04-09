@@ -1227,10 +1227,12 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["name"]["type"] == "string");
         assert!(schema["properties"]["age"]["type"] == "integer");
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("name")));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("name"))
+        );
     }
 
     #[test]

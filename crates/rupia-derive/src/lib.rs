@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Expr, Fields, Lit, Meta, Token};
+use syn::{DeriveInput, Expr, Fields, Lit, Meta, Token, parse_macro_input};
 
 struct RupiaAttrs {
     format: Option<String>,

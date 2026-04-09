@@ -1,6 +1,4 @@
-use rupia::{
-    HasSchema, Harness, HarnessConfig, Validation, parse_validate, parse_validate_typed,
-};
+use rupia::{Harness, HarnessConfig, HasSchema, Validation, parse_validate, parse_validate_typed};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -280,10 +278,29 @@ fn rule_engine_e2e_with_check() {
         },
     ];
     let engine = RuleEngine::new(&rules);
-    assert!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "pending"})).is_empty());
-    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "pending"})).len(), 1);
-    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "shipped"})).len(), 1);
-    assert_eq!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "shipped"})).len(), 2);
+    assert!(
+        engine
+            .evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "pending"}))
+            .is_empty()
+    );
+    assert_eq!(
+        engine
+            .evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "pending"}))
+            .len(),
+        1
+    );
+    assert_eq!(
+        engine
+            .evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "shipped"}))
+            .len(),
+        1
+    );
+    assert_eq!(
+        engine
+            .evaluate(&json!({"subtotal": 100, "tax": 10, "total": 999, "status": "shipped"}))
+            .len(),
+        2
+    );
     assert!(engine.evaluate(&json!({"subtotal": 100, "tax": 10, "total": 110, "status": "shipped", "tracking": "TRK1"})).is_empty());
 }
 

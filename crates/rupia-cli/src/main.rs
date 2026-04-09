@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rupia_core::diagnostic::{diagnose_parse_errors, format_diagnostics, format_diagnostics_json};
 use rupia_core::guard;
@@ -339,6 +339,50 @@ fn cmd_feedback(schema_path: &PathBuf, input: Option<PathBuf>) -> Result<()> {
     }
 }
 
+fn extract_fields(value: &serde_json::Value, fields: &[String]) -> Result<()> {
+    let mut lines = Vec::new();
+    for f in fields {
+        match rupia_core::field::extract(value, f) {
+            Ok(v) => lines.push(v),
+            Err(e) => {
+                eprintln!("field error: {e}");
+                bail!("field not found: {f}");
+            }
+        }
+    }
+    println!("{}", lines.join("\n"));
+    Ok(())
+}
+
+fn cross_field_errors(
+    rel: &[rupia_core::ave::RelationViolation],
+    rule: &[rupia_core::ave::RuleViolation],
+) -> serde_json::Value {
+    let mut errors: Vec<serde_json::Value> = rel
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "code": "RUPIA-REL001",
+                "message": v.description,
+                "help": format!("{} {} {} violated", v.field_a, v.operator, v.field_b),
+            })
+        })
+        .collect();
+    for rv in rule {
+        errors.push(serde_json::json!({
+            "code": "RUPIA-RULE001",
+            "message": rv.description,
+            "help": "JSONLogic rule violated",
+        }));
+    }
+    serde_json::json!({
+        "status": "invalid",
+        "error_count": errors.len(),
+        "feedback": "Cross-field constraints violated",
+        "errors": errors,
+    })
+}
+
 fn cmd_check(
     schema_path: &PathBuf,
     input: Option<PathBuf>,
@@ -360,49 +404,16 @@ fn cmd_check(
                 rupia_core::ave::validate_relations(&result.value, &loaded.relations);
             let rule_violations = rupia_core::ave::validate_rules(&result.value, &loaded.rules);
             if !rel_violations.is_empty() || !rule_violations.is_empty() {
-                let mut errors: Vec<serde_json::Value> = rel_violations
-                    .iter()
-                    .map(|v| {
-                        serde_json::json!({
-                            "code": "RUPIA-REL001",
-                            "message": v.description,
-                            "help": format!("{} {} {} violated", v.field_a, v.operator, v.field_b),
-                        })
-                    })
-                    .collect();
-                for rv in &rule_violations {
-                    errors.push(serde_json::json!({
-                        "code": "RUPIA-RULE001",
-                        "message": rv.description,
-                        "help": "JSONLogic rule violated",
-                    }));
-                }
-                let output = serde_json::json!({
-                    "status": "invalid",
-                    "error_count": errors.len(),
-                    "feedback": "Cross-field constraints violated",
-                    "errors": errors,
-                });
+                let output = cross_field_errors(&rel_violations, &rule_violations);
                 if !fields.is_empty() {
                     eprintln!("{}", serde_json::to_string_pretty(&output)?);
-                    bail!("validation failed: {} error(s)", errors.len());
+                    bail!("validation failed");
                 }
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(());
             }
             if !fields.is_empty() {
-                let mut lines = Vec::new();
-                for f in fields {
-                    match rupia_core::field::extract(&result.value, f) {
-                        Ok(v) => lines.push(v),
-                        Err(e) => {
-                            eprintln!("field error: {e}");
-                            bail!("field not found: {f}");
-                        }
-                    }
-                }
-                println!("{}", lines.join("\n"));
-                return Ok(());
+                return extract_fields(&result.value, fields);
             }
             let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
             let mut output = if json_output {

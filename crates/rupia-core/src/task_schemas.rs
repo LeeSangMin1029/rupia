@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskScale {
@@ -167,9 +167,10 @@ mod tests {
     #[test]
     fn task_relations_large_has_run_count() {
         let rels = task_relations(TaskScale::Large);
-        assert!(rels
-            .iter()
-            .any(|r| r.field_a == "run_count" && r.operator == "gte" && r.field_b == "1"));
+        assert!(
+            rels.iter()
+                .any(|r| r.field_a == "run_count" && r.operator == "gte" && r.field_b == "1")
+        );
     }
 
     #[test]

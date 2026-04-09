@@ -28,8 +28,16 @@ impl LlmFunction {
     pub fn parse(&self, input: &str) -> ParseResult<Value> {
         let parsed = match lenient::parse(input) {
             ParseResult::Success(v) => v,
-            ParseResult::Failure { data, input, errors } => {
-                return ParseResult::Failure { data, input, errors };
+            ParseResult::Failure {
+                data,
+                input,
+                errors,
+            } => {
+                return ParseResult::Failure {
+                    data,
+                    input,
+                    errors,
+                };
             }
         };
         ParseResult::Success(coerce_with_schema(parsed, &self.parameters))
@@ -95,11 +103,17 @@ impl LlmApplication {
     }
 
     pub fn to_openai_tools(&self) -> Vec<Value> {
-        self.functions.iter().map(LlmFunction::to_openai_tool).collect()
+        self.functions
+            .iter()
+            .map(LlmFunction::to_openai_tool)
+            .collect()
     }
 
     pub fn to_claude_tools(&self) -> Vec<Value> {
-        self.functions.iter().map(LlmFunction::to_claude_tool).collect()
+        self.functions
+            .iter()
+            .map(LlmFunction::to_claude_tool)
+            .collect()
     }
 }
 
@@ -215,11 +229,15 @@ mod tests {
 
     #[test]
     fn openai_tool_format() {
-        let func = LlmFunction::new("get_weather", "Get weather for a city", json!({
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"]
-        }));
+        let func = LlmFunction::new(
+            "get_weather",
+            "Get weather for a city",
+            json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }),
+        );
         let tool = func.to_openai_tool();
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["function"]["name"], "get_weather");
@@ -227,11 +245,15 @@ mod tests {
 
     #[test]
     fn claude_tool_format() {
-        let func = LlmFunction::new("get_weather", "Get weather", json!({
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"]
-        }));
+        let func = LlmFunction::new(
+            "get_weather",
+            "Get weather",
+            json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }),
+        );
         let tool = func.to_claude_tool();
         assert_eq!(tool["name"], "get_weather");
         assert!(tool["input_schema"].is_object());
@@ -261,14 +283,18 @@ mod tests {
     fn controller_execute() {
         let mut ctrl = LlmController::new("calculator", Calculator);
         ctrl.register(
-            LlmFunction::new("add", "Add two numbers", json!({
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"}
-                },
-                "required": ["a", "b"]
-            })),
+            LlmFunction::new(
+                "add",
+                "Add two numbers",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number"},
+                        "b": {"type": "number"}
+                    },
+                    "required": ["a", "b"]
+                }),
+            ),
             |_calc, args| Calculator::add(&args),
         );
         let result = ctrl.execute("add", json!({"a": 3, "b": 4})).unwrap();
@@ -279,11 +305,15 @@ mod tests {
     fn controller_execute_raw() {
         let mut ctrl = LlmController::new("calculator", Calculator);
         ctrl.register(
-            LlmFunction::new("add", "Add", json!({
-                "type": "object",
-                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-                "required": ["a", "b"]
-            })),
+            LlmFunction::new(
+                "add",
+                "Add",
+                json!({
+                    "type": "object",
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                    "required": ["a", "b"]
+                }),
+            ),
             |_calc, args| Calculator::add(&args),
         );
         let result = ctrl.execute_raw("add", r#"{"a": "3", "b": "4"}"#).unwrap();
@@ -294,11 +324,15 @@ mod tests {
     fn controller_validates_before_execute() {
         let mut ctrl = LlmController::new("calc", Calculator);
         ctrl.register(
-            LlmFunction::new("add", "Add", json!({
-                "type": "object",
-                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-                "required": ["a", "b"]
-            })),
+            LlmFunction::new(
+                "add",
+                "Add",
+                json!({
+                    "type": "object",
+                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+                    "required": ["a", "b"]
+                }),
+            ),
             |_calc, args| Calculator::add(&args),
         );
         let result = ctrl.execute("add", json!({"a": 3}));

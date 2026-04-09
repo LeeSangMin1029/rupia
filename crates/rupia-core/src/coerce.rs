@@ -341,10 +341,9 @@ fn coerce_object(
             result.insert(key.clone(), default.clone());
         }
     }
-    let additional =
-        schema
-            .get("additionalProperties")
-            .and_then(|v| if v.is_object() { Some(v) } else { None });
+    let additional = schema
+        .get("additionalProperties")
+        .and_then(|v| if v.is_object() { Some(v) } else { None });
     for (key, val) in &obj {
         if !properties.contains_key(key) {
             let coerced = match additional {
