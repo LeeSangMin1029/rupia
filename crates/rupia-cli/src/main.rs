@@ -65,6 +65,9 @@ enum Command {
         /// Output diagnostics as JSON
         #[arg(long)]
         json: bool,
+        /// Extract field(s) from validated data (e.g. --field type --field "authors[].role")
+        #[arg(long)]
+        field: Vec<String>,
     },
     /// Generate random data matching a JSON Schema
     Random {
@@ -167,7 +170,8 @@ fn main() -> ExitCode {
             input,
             strict,
             json,
-        } => cmd_check(&schema, input, strict, json, cli.verbose),
+            field,
+        } => cmd_check(&schema, input, strict, json, cli.verbose, &field),
         Command::Random { schema, count } => cmd_random(&schema, count),
         Command::CrossRef {
             domain,
@@ -341,6 +345,7 @@ fn cmd_check(
     strict: bool,
     json_output: bool,
     verbose: bool,
+    fields: &[String],
 ) -> Result<()> {
     let raw = read_input(input)?;
     let loaded = load_schema_full(schema_path)?;
@@ -354,25 +359,7 @@ fn cmd_check(
             let rel_violations =
                 rupia_core::ave::validate_relations(&result.value, &loaded.relations);
             let rule_violations = rupia_core::ave::validate_rules(&result.value, &loaded.rules);
-            let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
-            if rel_violations.is_empty() && rule_violations.is_empty() {
-                let mut output = if json_output {
-                    serde_json::json!({
-                        "status": "valid",
-                        "data": result.value,
-                        "diagnostics": format_diagnostics_json(&result.diagnostics),
-                    })
-                } else {
-                    serde_json::json!({
-                        "status": "valid",
-                        "data": result.value,
-                    })
-                };
-                if !ce_warnings.is_empty() {
-                    output["schema_warnings"] = serde_json::json!(ce_warnings);
-                }
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
+            if !rel_violations.is_empty() || !rule_violations.is_empty() {
                 let mut errors: Vec<serde_json::Value> = rel_violations
                     .iter()
                     .map(|v| {
@@ -396,11 +383,52 @@ fn cmd_check(
                     "feedback": "Cross-field constraints violated",
                     "errors": errors,
                 });
+                if !fields.is_empty() {
+                    eprintln!("{}", serde_json::to_string_pretty(&output)?);
+                    bail!("validation failed: {} error(s)", errors.len());
+                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
             }
+            if !fields.is_empty() {
+                let mut lines = Vec::new();
+                for f in fields {
+                    match rupia_core::field::extract(&result.value, f) {
+                        Ok(v) => lines.push(v),
+                        Err(e) => {
+                            eprintln!("field error: {e}");
+                            bail!("field not found: {f}");
+                        }
+                    }
+                }
+                println!("{}", lines.join("\n"));
+                return Ok(());
+            }
+            let ce_warnings = check_counterexamples(&loaded.schema, &loaded.counterexamples);
+            let mut output = if json_output {
+                serde_json::json!({
+                    "status": "valid",
+                    "data": result.value,
+                    "diagnostics": format_diagnostics_json(&result.diagnostics),
+                })
+            } else {
+                serde_json::json!({
+                    "status": "valid",
+                    "data": result.value,
+                })
+            };
+            if !ce_warnings.is_empty() {
+                output["schema_warnings"] = serde_json::json!(ce_warnings);
+            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
             Ok(())
         }
         Err(e) => {
+            if !fields.is_empty() {
+                let feedback = e.last_feedback.as_deref().unwrap_or("");
+                eprintln!("validation failed: {feedback}");
+                bail!("validation failed");
+            }
             let feedback = e.last_feedback.as_deref().unwrap_or("");
             let output = if json_output {
                 serde_json::json!({

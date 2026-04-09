@@ -18,3 +18,4 @@ pub mod task_schemas;
 pub mod embed;
 pub mod fetch;
 pub mod sync;
+pub mod field;
