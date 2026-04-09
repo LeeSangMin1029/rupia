@@ -8,8 +8,8 @@ repository.workspace = true
 description = "LLM output validation harness — lenient parsing, schema coercion, structured feedback for self-healing loops"
 
 [dependencies]
-rupia-core = { path = "../rupia-core" }
-rupia-derive = { path = "../rupia-derive" }
+rupia-core = { path = "../rupia-core", version = "0.2.0" }
+rupia-derive = { path = "../rupia-derive", version = "0.2.0" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

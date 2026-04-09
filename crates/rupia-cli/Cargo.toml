@@ -12,7 +12,7 @@ name = "rupia"
 path = "src/main.rs"
 
 [dependencies]
-rupia-core = { path = "../rupia-core" }
+rupia-core = { path = "../rupia-core", version = "0.2.0" }
 serde_json.workspace = true
 schemars.workspace = true
 clap = { version = "4", features = ["derive"] }

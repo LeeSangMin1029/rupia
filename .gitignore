@@ -7,9 +7,7 @@
 .gstack/
 .env
 .env.*
-/docs/design-*.md
-/docs/discussion-*.md
-/docs/ave-*.md
+/docs/
 /experiments/ave-test/
 .claude/
 .devflow/
